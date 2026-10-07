@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.12.10"
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Install
+        run: uv sync --locked --python 3.13
+      - name: ruff check
+        run: uv run --locked ruff check .
+      - name: ruff format --check
+        run: uv run --locked ruff format --check .
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Install
+        run: uv sync --locked --python ${{ matrix.python-version }}
+      - name: pytest (coverage >= 85 %)
+        # Integration tests are skipped: no NEXTCLOUD_MCP_IT_* variables are set here.
+        run: uv run --locked pytest -q --cov --cov-report=term-missing
+
+  licences:
+    name: Licence check (runtime closure)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Install
+        run: uv sync --locked --python 3.13
+      - name: Deny GPL / LGPL / AGPL / unknown
+        run: uv run --locked python scripts/check_licenses.py
+
+  build:
+    name: Build sdist and wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Build
+        run: uv build
+      - name: Smoke test the wheel
+        run: |
+          uv venv /tmp/wheel-venv --python 3.13
+          uv pip install --python /tmp/wheel-venv/bin/python dist/*.whl
+          /tmp/wheel-venv/bin/nextcloud-mcp-server --version
