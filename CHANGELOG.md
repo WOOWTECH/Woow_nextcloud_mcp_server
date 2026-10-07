@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.1.1 - 2026-10-08
+
+### Fixed
+
+- `backend_policy.async_client` is now called with only `base_url`, `auth`, `timeout` and
+  `headers`. 0.1.0 also passed `follow_redirects`, `trust_env`, `verify` (and a test
+  transport), which a real gateway hook sets itself, so the first tool call failed with
+  `TypeError: got multiple values for keyword argument`. The hook owns the transport,
+  TLS verification, `trust_env` and `follow_redirects`.
+- `NEXTCLOUD_MCP_VERIFY_TLS` / `NEXTCLOUD_MCP_CA_BUNDLE` are documented as ignored under
+  the hook, and a start-up warning is logged when they are set while the hook is active.
+
 ## 0.1.0 - 2026-10-07
 
 ### Added

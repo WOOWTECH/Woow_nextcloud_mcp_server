@@ -171,9 +171,11 @@ loopback 時回應 `403`。WOOW 閘道在轉送前會把 `Host` 改寫成 `127.0
 例如 `NEXTCLOUD_MCP_ALLOWED_HOSTS=mcp.example.com`。
 
 **`backend_policy` 掛鉤。** 若可以匯入名為 `backend_policy` 的 Python 模組，它必須提供可呼叫的
-`async_client(*, base_url, **kwargs)`；伺服器會用它建立唯一的 `httpx.AsyncClient`（傳入的
-關鍵字參數與伺服器自己建立時相同：Basic 驗證、`follow_redirects=False`、`trust_env=False`、
-逾時、TLS 驗證與 `User-Agent`），並在啟動時記錄一行 info。閘道用它來固定 DNS 並禁止重新導向。
+`async_client(*, base_url, **kwargs)`；伺服器會用它建立唯一的 `httpx.AsyncClient`，並在啟動時
+記錄一行 info。伺服器只傳入 `base_url`、`auth`（HTTP Basic）、`timeout` 與 `headers`
+（`User-Agent`）；傳輸層、TLS 驗證、`trust_env` 與 `follow_redirects` 由掛鉤自行設定
+（閘道用它來固定 DNS 並禁止重新導向）。無論如何，伺服器都會拒絕重新導向的回應。使用掛鉤時
+會忽略 `NEXTCLOUD_MCP_VERIFY_TLS` 與 `NEXTCLOUD_MCP_CA_BUNDLE`；若有設定，啟動時會記錄警告。
 掛鉤在啟動時就解析：沒有這個模組時使用一般的 `httpx.AsyncClient`；模組匯入失敗或沒有可呼叫的
 `async_client` 時，伺服器以狀態碼 2 停止，閘道的政策絕不會被默默略過。
 

@@ -210,52 +210,81 @@ async def test_error_body_is_capped_and_message_extracted(settings: Settings) ->
 # ----------------------------------------------------------------------- backend_policy hook
 
 
+def realistic_policy(transport: httpx.AsyncBaseTransport, calls: list[dict]):
+    """Mirror of a gateway hook: it owns transport, trust_env and follow_redirects.
+
+    Passing any of those again makes ``httpx.AsyncClient`` raise ``TypeError: got
+    multiple values for keyword argument`` - exactly what a real gateway hook does.
+    """
+
+    def async_client(*, base_url: str, **kwargs):
+        calls.append({"base_url": base_url, **kwargs})
+        kwargs.pop("limits", None)
+        return httpx.AsyncClient(
+            base_url=base_url,
+            transport=transport,
+            trust_env=False,
+            follow_redirects=False,
+            **kwargs,
+        )
+
+    return async_client
+
+
+def test_realistic_policy_rejects_duplicates(fake: FakeNextcloud) -> None:
+    hook = realistic_policy(fake.transport, [])
+    with pytest.raises(TypeError, match="multiple values"):
+        hook(base_url=BASE_URL, follow_redirects=False)
+
+
 async def test_backend_policy_hook_is_used(
     monkeypatch: pytest.MonkeyPatch, settings: Settings, fake: FakeNextcloud
 ) -> None:
     calls: list[dict] = []
-
-    def async_client(*, base_url: str, **kwargs):
-        calls.append({"base_url": base_url, **kwargs})
-        return httpx.AsyncClient(base_url=base_url, **kwargs)
-
     module = types.ModuleType("backend_policy")
-    module.async_client = async_client  # type: ignore[attr-defined]
+    module.async_client = realistic_policy(fake.transport, calls)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "backend_policy", module)
 
-    nc = NextcloudClient(settings, transport=fake.transport)
-    assert await nc.user_id() == USER_ID
-    assert len(calls) == 1
-    call = calls[0]
+    nc = NextcloudClient(settings, transport=httpx.MockTransport(lambda r: httpx.Response(599)))
+    assert await nc.user_id() == USER_ID  # served by the hook's transport, not ours
+    (call,) = calls
+    assert set(call) == {"base_url", "auth", "timeout", "headers"}
     assert call["base_url"] == BASE_URL
-    assert set(call) == {
-        "base_url",
-        "auth",
-        "follow_redirects",
-        "trust_env",
-        "verify",
-        "timeout",
-        "headers",
-        "transport",
-    }
-    assert call["follow_redirects"] is False
-    assert call["trust_env"] is False
     assert call["headers"] == {"User-Agent": USER_AGENT}
+    assert call["timeout"] == httpx.Timeout(30.0, connect=10.0)
+    http = await nc.http()
+    assert http.follow_redirects is False
     await nc.aclose()
 
 
 async def test_backend_policy_async_factory(
     monkeypatch: pytest.MonkeyPatch, settings: Settings, fake: FakeNextcloud
 ) -> None:
+    sync_hook = realistic_policy(fake.transport, [])
+
     async def async_client(*, base_url: str, **kwargs):
-        return httpx.AsyncClient(base_url=base_url, **kwargs)
+        return sync_hook(base_url=base_url, **kwargs)
 
     module = types.ModuleType("backend_policy")
     module.async_client = async_client  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "backend_policy", module)
-    nc = NextcloudClient(settings, transport=fake.transport)
+    nc = NextcloudClient(settings)
     assert await nc.user_id() == USER_ID
     await nc.aclose()
+
+
+def test_plain_client_kwargs_are_complete(settings: Settings, fake: FakeNextcloud) -> None:
+    nc = NextcloudClient(settings, transport=fake.transport)
+    assert set(nc.policy_kwargs()) == {"auth", "timeout", "headers"}
+    assert set(nc.client_kwargs()) == {
+        "auth",
+        "timeout",
+        "headers",
+        "follow_redirects",
+        "trust_env",
+        "verify",
+        "transport",
+    }
 
 
 @pytest.mark.parametrize(
@@ -285,11 +314,13 @@ def test_backend_policy_absent(settings: Settings) -> None:
 async def test_explicit_policy_argument(settings: Settings, fake: FakeNextcloud) -> None:
     used: list[str] = []
 
+    hook = realistic_policy(fake.transport, [])
+
     def factory(*, base_url: str, **kwargs):
         used.append(base_url)
-        return httpx.AsyncClient(base_url=base_url, **kwargs)
+        return hook(base_url=base_url, **kwargs)
 
-    nc = NextcloudClient(settings, transport=fake.transport, policy=factory)
+    nc = NextcloudClient(settings, policy=factory)
     await nc.user_id()
     assert used == [BASE_URL]
     await nc.aclose()

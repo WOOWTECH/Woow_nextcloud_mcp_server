@@ -182,10 +182,12 @@ that name, e.g. `NEXTCLOUD_MCP_ALLOWED_HOSTS=mcp.example.com`.
 
 **`backend_policy` hook.** If a Python module named `backend_policy` can be imported, it
 must provide a callable `async_client(*, base_url, **kwargs)`; the server then builds its
-single `httpx.AsyncClient` with it (passing the same keyword arguments it would use itself:
-Basic auth, `follow_redirects=False`, `trust_env=False`, timeouts, TLS verification and
-the `User-Agent`) and logs one info line at start-up. Gateways use this to pin DNS and
-forbid redirects. The hook is resolved at start-up: without the module a plain
+single `httpx.AsyncClient` with it and logs one info line at start-up. The server passes
+only `base_url`, `auth` (HTTP Basic), `timeout` and `headers` (the `User-Agent`); the hook
+owns the transport, TLS verification, `trust_env` and `follow_redirects` and must set them
+itself (gateways use it to pin DNS and forbid redirects). Redirect answers are refused by
+the server in any case. Under the hook `NEXTCLOUD_MCP_VERIFY_TLS` and
+`NEXTCLOUD_MCP_CA_BUNDLE` are ignored; a warning is logged at start-up if they are set. The hook is resolved at start-up: without the module a plain
 `httpx.AsyncClient` is used; a module that fails to import or has no callable
 `async_client` stops the server with exit status 2, so a gateway's policy can never be
 skipped silently.

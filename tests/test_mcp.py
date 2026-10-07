@@ -254,3 +254,49 @@ async def test_lifespan_closes_http_client(settings, fake, monkeypatch) -> None:
         await client.call_tool_mcp("get_file_tree", {})
         assert closed == []
     assert closed == [True]
+
+
+async def test_tool_calls_through_a_realistic_backend_policy(
+    make_settings, fake: FakeNextcloud, monkeypatch, caplog
+) -> None:
+    import sys
+    import types
+
+    from test_client import realistic_policy
+
+    calls: list[dict] = []
+    module = types.ModuleType("backend_policy")
+    module.async_client = realistic_policy(fake.transport, calls)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "backend_policy", module)
+    caplog.set_level(logging.WARNING, logger="nextcloud_mcp_server")
+
+    settings = make_settings(readonly=False)
+    async with Client(create_server(settings)) as client:
+        tree = await client.call_tool_mcp("get_file_tree", {"path": "Docs"})
+        assert tree.isError is False, tree.content
+        read = await client.call_tool_mcp("read_text_file", {"path": "Docs/readme.md"})
+        assert read.structuredContent["content"] == "# Hello\n"
+        created = await client.call_tool_mcp(
+            "create_text_file", {"path": "Docs/via-hook.txt", "content": "ok"}
+        )
+        assert created.structuredContent["status"] == "created"
+    assert len(calls) == 1
+    assert not {"follow_redirects", "trust_env", "transport", "verify"} & set(calls[0])
+    assert caplog.records == []  # default TLS settings: no warning
+
+
+async def test_tls_settings_ignored_under_policy_warns(
+    make_settings, fake: FakeNextcloud, monkeypatch, caplog
+) -> None:
+    import sys
+    import types
+
+    from test_client import realistic_policy
+
+    module = types.ModuleType("backend_policy")
+    module.async_client = realistic_policy(fake.transport, [])  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "backend_policy", module)
+    caplog.set_level(logging.WARNING, logger="nextcloud_mcp_server")
+    create_server(make_settings(verify_tls=False))
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("ignored: backend_policy owns TLS verification" in m for m in messages)

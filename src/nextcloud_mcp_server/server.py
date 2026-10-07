@@ -54,6 +54,11 @@ def create_server(
     nc = NextcloudClient(settings, transport=transport)
     if nc.policy is not None:
         logger.info("backend_policy.async_client will build the HTTP client")
+        if not settings.verify_tls or settings.ca_bundle:
+            logger.warning(
+                "NEXTCLOUD_MCP_VERIFY_TLS / NEXTCLOUD_MCP_CA_BUNDLE are ignored: "
+                "backend_policy owns TLS verification."
+            )
     for warning in settings.startup_warnings():
         logger.warning(warning)
 

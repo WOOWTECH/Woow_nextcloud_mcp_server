@@ -132,20 +132,24 @@ class NextcloudClient:
 
     # -- lifecycle -----------------------------------------------------------------
 
-    def client_kwargs(self) -> dict[str, Any]:
-        """Keyword arguments used to build the HTTP client (plain or via ``backend_policy``)."""
+    def policy_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments for ``backend_policy.async_client`` (besides ``base_url``).
+
+        Only what the server must decide: credentials, timeouts and headers. The hook owns
+        the transport, TLS verification, ``trust_env`` and ``follow_redirects`` (it sets
+        them itself, so passing them would be a duplicate keyword argument).
+        """
         settings = self.settings
-        kwargs: dict[str, Any] = {
+        return {
             "auth": httpx.BasicAuth(settings.username, settings.app_password.get_secret_value()),
-            "follow_redirects": False,
-            "trust_env": False,
-            "verify": self._verify,
-            "timeout": httpx.Timeout(
-                settings.request_timeout,
-                connect=CONNECT_TIMEOUT,
-            ),
+            "timeout": httpx.Timeout(settings.request_timeout, connect=CONNECT_TIMEOUT),
             "headers": {"User-Agent": USER_AGENT},
         }
+
+    def client_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments for the plain ``httpx.AsyncClient`` (no ``backend_policy``)."""
+        kwargs = self.policy_kwargs()
+        kwargs.update(follow_redirects=False, trust_env=False, verify=self._verify)
         if self._transport is not None:
             kwargs["transport"] = self._transport
         return kwargs
@@ -156,13 +160,14 @@ class NextcloudClient:
             return self._client
         async with self._client_lock:
             if self._client is None:
-                kwargs = self.client_kwargs()
                 if self.policy is not None:
-                    client = self.policy(base_url=self.settings.base_url, **kwargs)
+                    client = self.policy(base_url=self.settings.base_url, **self.policy_kwargs())
                     if inspect.isawaitable(client):
                         client = await client
                 else:
-                    client = httpx.AsyncClient(base_url=self.settings.base_url, **kwargs)
+                    client = httpx.AsyncClient(
+                        base_url=self.settings.base_url, **self.client_kwargs()
+                    )
                 self._client = client
         return self._client
 
