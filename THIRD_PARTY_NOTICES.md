@@ -9,13 +9,15 @@ The table is the complete runtime dependency closure of `uv.lock` for all platfo
 (development tools such as pytest and ruff are not included). It is produced and
 checked by `python scripts/check_licenses.py --markdown`; CI fails on GPL, LGPL, AGPL
 or unknown licences. Some packages are only installed on some platforms (for example
-`pywin32`, `pywin32-ctypes` and `tzdata` on Windows, `jeepney` and `secretstorage`
-on Linux).
+`pywin32` and `pywin32-ctypes` on Windows, `jeepney` and `secretstorage` on Linux).
+CI also fails when this table is out of sync with `uv.lock`
+(`--check-notices THIRD_PARTY_NOTICES.md`).
 
 Direct dependencies: `fastmcp` 3.4.5, `mcp` 1.28.1, `httpx` 0.28.1,
-`pydantic-settings` 2.15.0, `defusedxml` 0.7.1, `typing-extensions` 4.16.0 and, on
-Windows, `tzdata` 2026.5.
+`pydantic-settings` 2.15.0, `defusedxml` 0.7.1, `typing-extensions` 4.16.0 and
+`tzdata` 2026.5.
 
+<!-- BEGIN DEPENDENCY TABLE (scripts/check_licenses.py --write-notices) -->
 | Package | Version | Licence |
 |---|---|---|
 | aiofile | 3.12.3 | Apache-2.0 |
@@ -93,6 +95,7 @@ Windows, `tzdata` 2026.5.
 | watchfiles | 1.3.0 | MIT |
 | websockets | 17.2 | BSD-3-Clause |
 | zipp | 4.1.1 | MIT |
+<!-- END DEPENDENCY TABLE -->
 
 Licence notes:
 

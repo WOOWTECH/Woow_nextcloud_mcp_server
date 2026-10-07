@@ -49,8 +49,10 @@ def test_spdx_allowed(expression: str, allowed: bool) -> None:
                 ],
                 None,
             ),
-            True,
+            False,  # GPL family next to a permissive licence needs a manual decision
         ),
+        ((None, [], "BSD License\n\nParts may be used under the GNU GPL v2."), False),
+        ((None, ["License :: OSI Approved :: MIT License"], "see GPL notice"), False),
         ((None, [], "BSD License"), True),
         ((None, [], "MIT License\n\nPermission is hereby granted..."), True),
         ((None, [], "GNU GENERAL PUBLIC LICENSE Version 3"), False),
@@ -78,3 +80,59 @@ def test_main_offline_on_installed_closure(capsys: pytest.CaptureFixture[str]) -
     assert "| fastmcp |" in out
     # packages for other platforms are not installed here, so offline mode fails on them
     assert code in (0, 1)
+
+
+def test_manual_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        check_licenses,
+        "installed_metadata",
+        lambda name, version: (
+            None,
+            ["License :: OSI Approved :: GNU General Public License (GPL)"],
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        check_licenses, "runtime_closure", lambda lock: [("Some_Pkg", "1.0"), ("other", "2.0")]
+    )
+    monkeypatch.setattr(check_licenses, "MANUAL_ALLOWLIST", {"some-pkg": "checked 2026-10-08"})
+    results = check_licenses.check(ROOT / "uv.lock", offline=True)
+    assert [r.ok for r in results] == [True, False]
+    assert "manually allowed" in results[0].licence
+
+
+def test_notices_sync(tmp_path: Path) -> None:
+    notices = tmp_path / "N.md"
+    notices.write_text(
+        f"# N\n\n{check_licenses.NOTICES_BEGIN}\nold\n{check_licenses.NOTICES_END}\n\ntail\n"
+    )
+    assert not check_licenses.notices_in_sync(notices, "| new |")
+    check_licenses.write_notices(notices, "| new |")
+    assert check_licenses.notices_in_sync(notices, "| new |")
+    assert notices.read_text().endswith("\n\ntail\n")
+    broken = tmp_path / "B.md"
+    broken.write_text("no markers")
+    with pytest.raises(SystemExit):
+        check_licenses.notices_in_sync(broken, "x")
+
+
+def test_repository_notices_are_in_sync() -> None:
+    results = check_licenses.check(ROOT / "uv.lock", offline=True)
+    installed = {(r.name, r.version) for r in results if r.source == "installed"}
+    table = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
+    for name, version in installed:
+        assert f"| {name} | {version} |" in table
+
+
+def test_main_check_notices_reports_drift(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        check_licenses,
+        "check",
+        lambda lock, offline: [check_licenses.Result("a", "1", "MIT", "installed", True)],
+    )
+    notices = tmp_path / "N.md"
+    notices.write_text(f"{check_licenses.NOTICES_BEGIN}\nold\n{check_licenses.NOTICES_END}\n")
+    assert check_licenses.main(["--check-notices", str(notices)]) == 1
+    assert "out of sync" in capsys.readouterr().err
+    assert check_licenses.main(["--write-notices", str(notices)]) == 0
+    assert check_licenses.main(["--check-notices", str(notices)]) == 0

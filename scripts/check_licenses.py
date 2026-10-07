@@ -78,6 +78,13 @@ FREE_TEXT = {
     "the unlicense": "Unlicense",
 }
 
+# Packages whose metadata trips the rules above but whose licence a human has checked:
+# {"normalised-name": "reason and date"}. Keep empty unless really needed.
+MANUAL_ALLOWLIST: dict[str, str] = {}
+
+NOTICES_BEGIN = "<!-- BEGIN DEPENDENCY TABLE (scripts/check_licenses.py --write-notices) -->"
+NOTICES_END = "<!-- END DEPENDENCY TABLE -->"
+
 DENIED = re.compile(r"(^|[^A-Z])(A|L)?GPL|GNU (GENERAL|LESSER|LIBRARY|AFFERO)", re.IGNORECASE)
 
 
@@ -189,21 +196,27 @@ def spdx_allowed(expression: str) -> bool:
 def classify(
     expression: str | None, classifiers: list[str], free_text: str | None
 ) -> tuple[str, bool]:
-    """Return (licence description, allowed?) from the three metadata sources."""
+    """Return (licence description, allowed?) from the three metadata sources.
+
+    A PEP 639 ``License-Expression`` is authoritative. Otherwise any GPL-family licence
+    classifier or any GPL-family wording anywhere in the free-text ``License`` field
+    fails the package (even next to a permissive one): such cases need a human decision
+    recorded in :data:`MANUAL_ALLOWLIST`.
+    """
     if expression:
         return expression, spdx_allowed(expression)
     licence_classifiers = [c for c in classifiers if c.startswith("License ::")]
-    mapped = [CLASSIFIERS.get(c) for c in licence_classifiers]
-    if licence_classifiers:
-        if any(DENIED.search(c) for c in licence_classifiers) and not any(mapped):
-            return " OR ".join(licence_classifiers), False
-        names = [m for m in mapped if m]
-        if names:
-            # several licence classifiers mean a choice (dual licensing)
-            return " OR ".join(names), True
-    if free_text:
-        text = free_text.strip()
-        first_line = text.splitlines()[0].strip().rstrip(".") if text else ""
+    text = (free_text or "").strip()
+    if any(DENIED.search(c) for c in licence_classifiers):
+        return " OR ".join(licence_classifiers), False
+    if text and DENIED.search(text):
+        return f"mentions GPL ({text.splitlines()[0][:50]!r})", False
+    names = [m for m in (CLASSIFIERS.get(c) for c in licence_classifiers) if m]
+    if names:
+        # several licence classifiers mean a choice (dual licensing)
+        return " OR ".join(names), True
+    if text:
+        first_line = text.splitlines()[0].strip().rstrip(".")
         lowered = first_line.lower()
         name = FREE_TEXT.get(lowered)
         if name is None:
@@ -213,9 +226,7 @@ def classify(
                     break
         if name:
             return name, True
-        if DENIED.search(text):
-            return first_line[:60], False
-        if spdx_allowed(first_line):
+        if spdx_allowed(first_line) and len(text.splitlines()) == 1:
             return first_line, True
         return f"unknown ({first_line[:40]!r})", False
     return "unknown", False
@@ -255,24 +266,57 @@ def check(lock_path: Path, *, offline: bool) -> list[Result]:
             meta = pypi_metadata(name, version)
             source = "pypi"
         licence, ok = classify(*meta)
+        if not ok and _norm(name) in MANUAL_ALLOWLIST:
+            licence, ok = f"{licence} [manually allowed: {MANUAL_ALLOWLIST[_norm(name)]}]", True
         results.append(Result(name, version, licence, source, ok))
     return results
 
 
+def markdown_table(results: list[Result]) -> str:
+    lines = ["| Package | Version | Licence |", "|---|---|---|"]
+    lines += [f"| {r.name} | {r.version} | {r.licence} |" for r in results]
+    return "\n".join(lines)
+
+
+def _split_notices(text: str) -> tuple[str, str, str]:
+    try:
+        head, rest = text.split(NOTICES_BEGIN, 1)
+        table, tail = rest.split(NOTICES_END, 1)
+    except ValueError:
+        raise SystemExit("THIRD_PARTY_NOTICES markers not found") from None
+    return head, table.strip(), tail
+
+
+def notices_in_sync(path: Path, table: str) -> bool:
+    return _split_notices(path.read_text(encoding="utf-8"))[1] == table
+
+
+def write_notices(path: Path, table: str) -> None:
+    head, _, tail = _split_notices(path.read_text(encoding="utf-8"))
+    path.write_text(f"{head}{NOTICES_BEGIN}\n{table}\n{NOTICES_END}{tail}", encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    default_lock = Path(__file__).resolve().parents[1] / "uv.lock"
-    parser.add_argument("--lock", type=Path, default=default_lock)
+    root = Path(__file__).resolve().parents[1]
+    parser.add_argument("--lock", type=Path, default=root / "uv.lock")
     parser.add_argument("--offline", action="store_true", help="never query PyPI")
     parser.add_argument("--markdown", action="store_true", help="print a Markdown table")
+    parser.add_argument(
+        "--check-notices",
+        type=Path,
+        metavar="FILE",
+        help="fail when the dependency table in FILE differs from uv.lock",
+    )
+    parser.add_argument(
+        "--write-notices", type=Path, metavar="FILE", help="rewrite the dependency table in FILE"
+    )
     args = parser.parse_args(argv)
 
     results = check(args.lock, offline=args.offline)
+    table = markdown_table(results)
     if args.markdown:
-        print("| Package | Version | Licence |")
-        print("|---|---|---|")
-        for r in results:
-            print(f"| {r.name} | {r.version} | {r.licence} |")
+        print(table)
     else:
         width = max(len(r.name) for r in results)
         for r in results:
@@ -283,7 +327,17 @@ def main(argv: list[str] | None = None) -> int:
         f"\n{len(results)} runtime packages checked, {len(bad)} not allowed.",
         file=sys.stderr,
     )
-    return 1 if bad else 0
+    code = 1 if bad else 0
+    if args.write_notices:
+        write_notices(args.write_notices, table)
+    if args.check_notices and not notices_in_sync(args.check_notices, table):
+        print(
+            f"{args.check_notices} is out of sync with uv.lock; run "
+            f"scripts/check_licenses.py --write-notices {args.check_notices}",
+            file=sys.stderr,
+        )
+        code = 1
+    return code
 
 
 if __name__ == "__main__":

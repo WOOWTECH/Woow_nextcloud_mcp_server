@@ -1826,7 +1826,7 @@ dependencies = [
     { name = "mcp" },
     { name = "pydantic-settings" },
     { name = "typing-extensions" },
-    { name = "tzdata", marker = "sys_platform == 'win32'" },
+    { name = "tzdata" },
 ]
 
 [package.dev-dependencies]
@@ -1845,7 +1845,7 @@ requires-dist = [
     { name = "mcp", specifier = "==1.28.1" },
     { name = "pydantic-settings", specifier = "==2.15.0" },
     { name = "typing-extensions", specifier = "==4.16.0" },
-    { name = "tzdata", marker = "sys_platform == 'win32'", specifier = "==2026.5" },
+    { name = "tzdata", specifier = "==2026.5" },
 ]
 
 [package.metadata.requires-dev]
