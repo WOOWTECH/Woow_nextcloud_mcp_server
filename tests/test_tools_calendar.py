@@ -171,10 +171,40 @@ async def test_list_tasks_empty_calendar_data(tools: NextcloudTools, fake: FakeN
         b"</d:multistatus>"
     )
     fake.override = lambda r: httpx.Response(207, content=xml) if r.method == "REPORT" else None
-    assert await tools.list_tasks() == {"tasks": [], "truncated": False}
+    assert await tools.list_tasks() == {
+        "tasks": [],
+        "truncated": False,
+        "skipped_large_objects": 0,
+    }
 
 
 async def test_calendar_home_missing(tools: NextcloudTools, fake: FakeNextcloud) -> None:
     fake.override = lambda r: httpx.Response(404) if "/calendars/" in str(r.url) else None
     with pytest.raises(ToolError, match="no calendar home"):
         await tools.list_calendars()
+
+
+async def test_large_calendar_objects_are_skipped(
+    tools: NextcloudTools, fake: FakeNextcloud, monkeypatch
+) -> None:
+    import nextcloud_mcp_server.caldav as caldav_module
+    import nextcloud_mcp_server.tools as tools_module
+
+    monkeypatch.setattr(caldav_module, "MAX_OBJECT_CHARS", 400)
+    monkeypatch.setattr(tools_module, "OFFLOAD_BYTES", 10)  # also exercise the thread path
+    cal = fake.add_calendar("t", "T", ["VTODO"])
+    cal.objects["small.ics"] = vtodo("s", "Small")
+    cal.objects["big.ics"] = vtodo("b", "Big", "DESCRIPTION:" + "x" * 500)
+    result = await tools.list_tasks()
+    assert [t["uid"] for t in result["tasks"]] == ["s"]
+    assert result["skipped_large_objects"] == 1
+
+
+async def test_override_only_objects_are_skipped(
+    tools: NextcloudTools, fake: FakeNextcloud
+) -> None:
+    cal = fake.add_calendar("t", "T", ["VTODO"])
+    cal.objects["o.ics"] = vtodo("o", "Only an override", "RECURRENCE-ID:20261010T000000Z")
+    cal.objects["r.ics"] = vtodo("r", "Series", "RRULE:FREQ=DAILY", "DUE:20261001T090000Z")
+    result = await tools.list_tasks()
+    assert [(t["uid"], t["due"]) for t in result["tasks"]] == [("r", "2026-10-01T09:00:00Z")]

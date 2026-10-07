@@ -43,7 +43,9 @@ async def test_tools_list_schemas(settings, fake: FakeNextcloud) -> None:
             assert tool.annotations.destructiveHint is False
         else:
             assert tool.annotations.readOnlyHint is False
-        assert tool.annotations.destructiveHint is (tool.name == "delete_file_checked")
+        assert tool.annotations.destructiveHint is (
+            tool.name in ("update_text_file", "upload_file", "delete_file_checked")
+        )
         assert tool.annotations.idempotentHint is True
         if tool.name == "get_file_content":
             assert tool.outputSchema is None
@@ -106,11 +108,40 @@ async def test_gating(make_settings, fake: FakeNextcloud, overrides, expected) -
     assert await _tool_names(make_settings(**overrides), fake) == expected
 
 
-async def test_unknown_disabled_tool_is_logged(make_settings, fake, caplog) -> None:
+def test_unknown_disabled_tool_is_a_settings_error(make_settings) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="unknown tool name"):
+        make_settings(disabled_tools="nope,get_file_tree")
+
+
+async def test_backend_policy_logged_at_start(
+    settings, fake: FakeNextcloud, monkeypatch, caplog
+) -> None:
+    import sys
+    import types
+
+    module = types.ModuleType("backend_policy")
+    module.async_client = lambda **kw: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "backend_policy", module)
+    caplog.set_level(logging.INFO, logger="nextcloud_mcp_server")
+    create_server(settings, transport=fake.transport)
+    assert [r.getMessage() for r in caplog.records].count(
+        "backend_policy.async_client will build the HTTP client"
+    ) == 1
+
+
+async def test_startup_warnings(make_settings, fake: FakeNextcloud, caplog) -> None:
     caplog.set_level(logging.WARNING, logger="nextcloud_mcp_server")
-    names = await _tool_names(make_settings(disabled_tools="nope,get_file_tree"), fake)
-    assert "get_file_tree" not in names
-    assert any("nope" in record.getMessage() for record in caplog.records)
+    create_server(make_settings(), transport=fake.transport)
+    assert caplog.records == []
+    create_server(
+        make_settings(verify_tls=False, base_url="http://192.168.1.2/nc"),
+        transport=fake.transport,
+    )
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "VERIFY_TLS=false" in messages
+    assert "http://" in messages
 
 
 async def test_gated_tool_cannot_be_called(make_settings, fake: FakeNextcloud) -> None:
@@ -172,7 +203,11 @@ async def test_call_tools_end_to_end(settings, fake: FakeNextcloud) -> None:
         calendars = await client.call_tool_mcp("list_calendars", {})
         assert calendars.structuredContent == {"calendars": []}
         tasks = await client.call_tool_mcp("list_tasks", {})
-        assert tasks.structuredContent == {"tasks": [], "truncated": False}
+        assert tasks.structuredContent == {
+            "tasks": [],
+            "truncated": False,
+            "skipped_large_objects": 0,
+        }
 
 
 @pytest.mark.parametrize(

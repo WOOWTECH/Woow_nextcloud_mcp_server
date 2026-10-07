@@ -356,11 +356,43 @@ async def test_update_stale_etag(tools: NextcloudTools, fake: FakeNextcloud) -> 
     assert fake.files["Docs/readme.md"].data == b"# Hello\n"
 
 
+async def test_update_of_missing_file(tools: NextcloudTools, fake: FakeNextcloud) -> None:
+    with pytest.raises(ToolError) as info:
+        await tools.update_text_file("Docs/missing.md", "x", "abc")
+    assert str(info.value) == (
+        '"Docs/missing.md" does not exist; use create_text_file to create it.'
+    )
+
+
+async def test_upload_replace_of_missing_file(tools: NextcloudTools) -> None:
+    with pytest.raises(ToolError) as info:
+        await tools.upload_file("gone.bin", "AAEC", "abc")
+    assert str(info.value) == (
+        '"gone.bin" does not exist; upload it without expected_etag to create it.'
+    )
+
+
+async def test_delete_412_when_file_vanished(tools: NextcloudTools, fake: FakeNextcloud) -> None:
+    etag = fake.files["photo.png"].etag
+
+    def override(request: httpx.Request) -> httpx.Response | None:
+        if request.method == "DELETE":
+            del fake.files["photo.png"]
+            return httpx.Response(412)
+        return None
+
+    fake.override = override
+    with pytest.raises(ToolError) as info:
+        await tools.delete_file_checked("photo.png", etag)
+    assert str(info.value) == '"photo.png" does not exist; nothing was deleted.'
+
+
 async def test_update_stale_etag_unknown_current(
     tools: NextcloudTools, fake: FakeNextcloud
 ) -> None:
+    fake.override = lambda r: httpx.Response(412) if r.method == "PUT" else httpx.Response(500)
     with pytest.raises(ToolError, match=r"current etag unknown"):
-        await tools.update_text_file("Docs/missing.md", "x", "abc")
+        await tools.update_text_file("Docs/readme.md", "x", "abc")
 
 
 async def test_update_requires_etag(tools: NextcloudTools, fake: FakeNextcloud) -> None:
@@ -531,3 +563,116 @@ def _tools(fake: FakeNextcloud, settings) -> NextcloudTools:
     from nextcloud_mcp_server.client import NextcloudClient
 
     return NextcloudTools(NextcloudClient(settings, transport=fake.transport), settings)
+
+
+# ------------------------------------------------------------------------------- server hrefs
+
+_PREFIX = "/nc/remote.php/dav/files/alice%20smith/"
+
+
+def _ms(*responses: str) -> bytes:
+    return ('<d:multistatus xmlns:d="DAV:">' + "".join(responses) + "</d:multistatus>").encode()
+
+
+def _resp(href: str, folder: bool = False, status: str | None = None) -> str:
+    rtype = "<d:collection/>" if folder else ""
+    if status:
+        return f"<d:response><d:href>{href}</d:href><d:status>{status}</d:status></d:response>"
+    return (
+        f"<d:response><d:href>{href}</d:href><d:propstat><d:prop><d:resourcetype>{rtype}"
+        '</d:resourcetype><d:getetag>"e"</d:getetag></d:prop>'
+        "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+    )
+
+
+async def test_unsafe_server_hrefs_are_dropped_and_never_followed(
+    tools: NextcloudTools, fake: FakeNextcloud
+) -> None:
+    listing = _ms(
+        _resp(_PREFIX, folder=True),
+        _resp(_PREFIX + "..", folder=True),
+        _resp(_PREFIX + "ok/", folder=True),
+        _resp(_PREFIX + "bad%E2%80%AEname", folder=False),
+        _resp(_PREFIX + "x%0Ay.txt"),
+        _resp(_PREFIX + "gone.txt", status="HTTP/1.1 404 Not Found"),
+    )
+    seen: list[bytes] = []
+
+    def override(request: httpx.Request) -> httpx.Response | None:
+        seen.append(request.url.raw_path)
+        if request.url.raw_path.endswith(b"/ok"):
+            return httpx.Response(207, content=_ms(_resp(_PREFIX + "ok/", folder=True)))
+        return httpx.Response(207, content=listing)
+
+    fake.override = override
+    result = await tools.get_file_tree("", depth=3)
+    assert [e["path"] for e in result["entries"]] == ["ok"]
+    assert all(b".." not in path for path in seen)
+    assert len(seen) == 2  # home + "ok" only
+
+
+async def test_depth0_answer_with_foreign_href_is_the_resource(
+    tools: NextcloudTools, fake: FakeNextcloud
+) -> None:
+    single = _ms(
+        "<d:response><d:href>/other-webroot/remote.php/dav/files/alice/Docs/readme.md</d:href>"
+        "<d:propstat><d:prop><d:resourcetype/><d:getcontentlength>8</d:getcontentlength>"
+        '<d:getetag>"abc"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status>'
+        "</d:propstat></d:response>"
+    )
+
+    def override(request: httpx.Request) -> httpx.Response | None:
+        if request.method == "PROPFIND":
+            return httpx.Response(207, content=single)
+        return None
+
+    fake.override = override
+    result = await tools.read_text_file("Docs/readme.md")
+    assert result["content"] == "# Hello\n"
+    tree = await tools.get_file_tree("Docs/readme.md")
+    assert tree["entries"][0]["path"] == "Docs/readme.md"
+
+
+async def test_listing_with_only_foreign_hrefs_explains_webroot(
+    tools: NextcloudTools, fake: FakeNextcloud
+) -> None:
+    foreign = _ms(
+        _resp("/other/remote.php/dav/files/alice/", folder=True),
+        _resp("/other/remote.php/dav/files/alice/a.txt"),
+    )
+    fake.override = lambda r: httpx.Response(207, content=foreign)
+    with pytest.raises(ToolError, match="overwritewebroot") as info:
+        await tools.get_file_tree("")
+    assert "NEXTCLOUD_MCP_BASE_URL" in str(info.value)
+
+
+async def test_large_listing_is_parsed_in_a_thread(
+    tools: NextcloudTools, fake: FakeNextcloud, monkeypatch
+) -> None:
+    import nextcloud_mcp_server.tools as tools_module
+
+    calls: list[str] = []
+    original = tools_module.asyncio.to_thread
+
+    async def to_thread(fn, *args):
+        calls.append(fn.__name__)
+        return await original(fn, *args)
+
+    monkeypatch.setattr(tools_module, "OFFLOAD_BYTES", 10)
+    monkeypatch.setattr(tools_module.asyncio, "to_thread", to_thread)
+    result = await tools.get_file_tree("")
+    assert len(result["entries"]) == 3
+    assert calls == ["parse_multistatus"]
+
+
+async def test_write_answer_too_large_is_a_tool_error(
+    tools: NextcloudTools, fake: FakeNextcloud, monkeypatch
+) -> None:
+    import nextcloud_mcp_server.client as client_module
+
+    monkeypatch.setattr(client_module, "MAX_XML_BYTES", 3)
+    fake.override = lambda r: (
+        httpx.Response(201, content=b"0123456789") if r.method == "PUT" else None
+    )
+    with pytest.raises(ToolError, match=r'answer for "big.txt" is larger than 3 bytes'):
+        await tools.create_text_file("big.txt", "x")

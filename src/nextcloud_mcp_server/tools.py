@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
 import mimetypes
 from collections.abc import Callable
 from typing import Annotated, Any, Literal
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -18,7 +19,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 from typing_extensions import TypedDict
 
-from .caldav import calendar_entry, is_done, parse_tasks, sort_tasks
+from .caldav import calendar_entry, is_done, sort_tasks, tasks_from_report
 from .client import BodyTooLarge, NextcloudClient
 from .errors import NextcloudHTTPError, Operation, stale_message
 from .paths import (
@@ -31,7 +32,6 @@ from .paths import (
 )
 from .settings import Settings
 from .webdav import (
-    CALDAV,
     CALENDAR_PROPFIND,
     ETAG_PROPFIND,
     FILE_PROPFIND,
@@ -45,6 +45,7 @@ from .webdav import (
 logger = logging.getLogger("nextcloud_mcp_server")
 
 XML_CONTENT_TYPE = "application/xml; charset=utf-8"
+OFFLOAD_BYTES = 256 * 1024  # parse answers larger than this in a worker thread
 DELETE_NOTE = "Moved to the Nextcloud trash bin when the Deleted files app is enabled."
 _MIME = mimetypes.MimeTypes()  # built-in table only: same answer on every platform
 
@@ -115,6 +116,7 @@ class TaskInfo(TypedDict):
 class TaskList(TypedDict):
     tasks: list[TaskInfo]
     truncated: bool
+    skipped_large_objects: int
 
 
 class CreatedFile(TypedDict):
@@ -228,6 +230,13 @@ LimitArg = Annotated[
 # --------------------------------------------------------------------------- implementation
 
 
+async def _offload(size: int, fn: Callable[..., Any], *args: Any) -> Any:
+    """Run CPU-bound parsing of large answers off the event loop."""
+    if size > OFFLOAD_BYTES:
+        return await asyncio.to_thread(fn, *args)
+    return fn(*args)
+
+
 class NextcloudTools:
     """Tool implementations bound to one :class:`NextcloudClient`."""
 
@@ -258,7 +267,7 @@ class NextcloudTools:
             )
         except BodyTooLarge:
             raise ToolError(f'The listing of "{label}" is too large to process.') from None
-        return parse_multistatus(reply.body)
+        return await _offload(len(reply.body), parse_multistatus, reply.body)
 
     async def _entries(
         self, normalized: str, depth: Literal["0", "1"], *, op: Operation = "list"
@@ -271,15 +280,35 @@ class NextcloudTools:
         own: FileEntry | None = None
         children: list[FileEntry] = []
         prefix = f"{normalized}/" if normalized else ""
+        matched = False
         for item in items:
-            path = href_to_path(item.href, home_path)
-            if path is None:
+            raw = href_to_path(item.href, home_path)
+            if raw is None:
+                continue
+            matched = True
+            try:
+                # Server paths go through the same checks as user input; anything that is
+                # not a safe user path (e.g. ending in "/..") is dropped, never followed.
+                path = normalize_path(raw)
+            except ToolError:
+                logger.info("ignored a server path that is not a safe user path")
                 continue
             entry: FileEntry = file_entry(item, path)  # type: ignore[assignment]
             if path == normalized:
                 own = entry
             elif path.startswith(prefix) and "/" not in path[len(prefix) :]:
                 children.append(entry)
+        if items and not matched:
+            if len(items) == 1:
+                # A single response (always so for Depth 0, and for Depth 1 on a file or an
+                # empty folder) describes the requested resource itself.
+                own = file_entry(items[0], normalized)  # type: ignore[assignment]
+            else:
+                raise ToolError(
+                    f"Nextcloud answered with paths outside {unquote(home_path)}; check "
+                    "NEXTCLOUD_MCP_BASE_URL and, behind a reverse proxy, the 'overwritewebroot' "
+                    "setting of Nextcloud."
+                )
         return own, children
 
     async def _stat(self, normalized: str, *, op: Operation = "read") -> FileEntry:
@@ -288,23 +317,32 @@ class NextcloudTools:
             raise ToolError(f'"{display_path(normalized)}" does not exist.')
         return own
 
-    async def _current_etag(self, url: str, label: str) -> str | None:
-        """Best-effort PROPFIND for the current etag (used in 412 messages and after writes)."""
+    async def _current_state(self, url: str, label: str) -> tuple[bool, str | None]:
+        """Best-effort PROPFIND: (exists, current etag). ``exists`` is True when unknown."""
         try:
             items = await self._propfind(url, "0", label, body=ETAG_PROPFIND, op="read")
+        except NextcloudHTTPError as exc:
+            return exc.status != 404, None
         except ToolError:
-            return None
+            return True, None
         for item in items:
             etag = normalize_etag(item.text(tag("DAV:", "getetag")))
             if etag:
-                return etag
-        return None
+                return True, etag
+        return True, None
+
+    async def _precondition_failed(self, url: str, label: str, missing_hint: str) -> ToolError:
+        """Explain a 412 on a guarded write: the file is gone, or it changed."""
+        exists, etag = await self._current_state(url, label)
+        if not exists:
+            return ToolError(f'"{label}" does not exist; {missing_hint}.')
+        return ToolError(stale_message(label, etag))
 
     async def _etag_after_write(self, url: str, label: str, headers: Any) -> str | None:
         etag = normalize_etag(headers.get("etag") or headers.get("oc-etag"))
         if etag:
             return etag
-        return await self._current_etag(url, label)
+        return (await self._current_state(url, label))[1]
 
     @staticmethod
     def _file_path(path: str) -> str:
@@ -483,6 +521,7 @@ class NextcloudTools:
         else:
             targets = [c for c in calendars if "VTODO" in c["components"]]
         tasks: list[dict[str, Any]] = []
+        skipped = 0
         for target in targets:
             url = f"{home}{quote(target['id'], safe='')}/"
             try:
@@ -504,17 +543,21 @@ class NextcloudTools:
                     logger.info("skipped a calendar that could not be read")
                     continue
                 raise
-            for item in parse_multistatus(reply.body):
-                data = item.props.get(tag(CALDAV, "calendar-data"))
-                if data is None or not (data.text or "").strip():
-                    continue
-                tasks.extend(parse_tasks(target["id"], data.text or ""))
+            found, too_large = await _offload(
+                len(reply.body), tasks_from_report, target["id"], reply.body
+            )
+            tasks.extend(found)
+            skipped += too_large
         if not include_completed:
             tasks = [t for t in tasks if not is_done(t)]
         ordered = sort_tasks(tasks)
         for task in ordered:
             task.pop("_due_sort", None)
-        return {"tasks": ordered[:limit], "truncated": len(ordered) > limit}  # type: ignore[typeddict-item]
+        return {
+            "tasks": ordered[:limit],  # type: ignore[typeddict-item]
+            "truncated": len(ordered) > limit,
+            "skipped_large_objects": skipped,
+        }
 
     # -- write tools ---------------------------------------------------------------
 
@@ -559,8 +602,9 @@ class NextcloudTools:
             )
         except NextcloudHTTPError as exc:
             if exc.status == 412:
-                current = await self._current_etag(url, normalized)
-                raise ToolError(stale_message(normalized, current)) from None
+                raise await self._precondition_failed(
+                    url, normalized, "use create_text_file to create it"
+                ) from None
             raise
         etag = await self._etag_after_write(url, normalized, reply.headers)
         return {
@@ -613,8 +657,9 @@ class NextcloudTools:
             )
         except NextcloudHTTPError as exc:
             if exc.status == 412 and previous is not None:
-                current = await self._current_etag(url, normalized)
-                raise ToolError(stale_message(normalized, current)) from None
+                raise await self._precondition_failed(
+                    url, normalized, "upload it without expected_etag to create it"
+                ) from None
             raise
         etag = await self._etag_after_write(url, normalized, reply.headers)
         return {
@@ -646,8 +691,9 @@ class NextcloudTools:
             )
         except NextcloudHTTPError as exc:
             if exc.status == 412:
-                current = await self._current_etag(url, normalized)
-                raise ToolError(stale_message(normalized, current)) from None
+                raise await self._precondition_failed(
+                    url, normalized, "nothing was deleted"
+                ) from None
             raise
         return {"status": "deleted", "path": normalized, "etag": expected, "note": DELETE_NOTE}
 
@@ -683,7 +729,9 @@ DESCRIPTIONS: dict[str, str] = {
         "all calendars that hold tasks. Open tasks only unless include_completed is true. "
         "Sorted open first, then by due date (tasks without due date last), then summary; "
         "at most `limit` tasks, truncated=true when more exist. Descriptions are cut at "
-        "500 characters. Read-only: this server cannot change tasks."
+        "500 characters. Recurring tasks are not expanded: due/start are those of the first "
+        "occurrence; objects holding only changed occurrences are skipped, and objects over "
+        "1 MiB are counted in skipped_large_objects. Read-only: this server cannot change tasks."
     ),
     "create_text_file": (
         "Create a NEW text file with the given UTF-8 content. Never overwrites: if the file "
@@ -731,9 +779,13 @@ def _annotations(name: str) -> ToolAnnotations:
         )
     if name in WRITE_TOOLS:
         # Every write is guarded by If-None-Match / If-Match, so repeating a call cannot
-        # change anything a second time; Nextcloud keeps previous versions of replaced files.
+        # change anything a second time. Replacing content is destructive (even though
+        # Nextcloud usually keeps versions); only create_text_file never overwrites.
         return ToolAnnotations(
-            title=TITLES[name], readOnlyHint=False, destructiveHint=False, idempotentHint=True
+            title=TITLES[name],
+            readOnlyHint=False,
+            destructiveHint=name != "create_text_file",
+            idempotentHint=True,
         )
     return ToolAnnotations(
         title=TITLES[name], readOnlyHint=False, destructiveHint=True, idempotentHint=True
@@ -796,10 +848,7 @@ def enabled_tools(settings: Settings) -> list[str]:
         names += WRITE_TOOLS
         if settings.allow_delete:
             names += DELETE_TOOLS
-    disabled = settings.disabled_tool_names
-    unknown = sorted(disabled - set(ALL_TOOLS))
-    if unknown:
-        logger.warning("DISABLED_TOOLS names unknown tools: %s", ", ".join(unknown))
+    disabled = settings.disabled_tool_names  # unknown names are rejected by Settings
     return [name for name in names if name not in disabled]
 
 

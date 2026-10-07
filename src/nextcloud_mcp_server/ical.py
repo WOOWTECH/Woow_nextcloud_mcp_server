@@ -25,16 +25,68 @@ class Property:
     value: str
 
 
+_FOLD = re.compile(r"\n[ \t]")
+
+# Windows / Outlook time zone names seen in TZID parameters, mapped to IANA names.
+# Source: the public Unicode CLDR "windowsZones" table (territory 001 entries).
+# Names not listed here (and not IANA names) keep the time floating.
+WINDOWS_ZONES = {
+    "UTC": "UTC",
+    "GMT Standard Time": "Europe/London",
+    "Greenwich Standard Time": "Atlantic/Reykjavik",
+    "W. Europe Standard Time": "Europe/Berlin",
+    "Central Europe Standard Time": "Europe/Budapest",
+    "Central European Standard Time": "Europe/Warsaw",
+    "Romance Standard Time": "Europe/Paris",
+    "E. Europe Standard Time": "Europe/Chisinau",
+    "FLE Standard Time": "Europe/Kiev",
+    "GTB Standard Time": "Europe/Bucharest",
+    "Russian Standard Time": "Europe/Moscow",
+    "Eastern Standard Time": "America/New_York",
+    "Central Standard Time": "America/Chicago",
+    "Mountain Standard Time": "America/Denver",
+    "Pacific Standard Time": "America/Los_Angeles",
+    "Alaskan Standard Time": "America/Anchorage",
+    "Hawaiian Standard Time": "Pacific/Honolulu",
+    "Atlantic Standard Time": "America/Halifax",
+    "E. South America Standard Time": "America/Sao_Paulo",
+    "India Standard Time": "Asia/Calcutta",
+    "China Standard Time": "Asia/Shanghai",
+    "Taipei Standard Time": "Asia/Taipei",
+    "Tokyo Standard Time": "Asia/Tokyo",
+    "Korea Standard Time": "Asia/Seoul",
+    "Singapore Standard Time": "Asia/Singapore",
+    "SE Asia Standard Time": "Asia/Bangkok",
+    "Arabian Standard Time": "Asia/Dubai",
+    "AUS Eastern Standard Time": "Australia/Sydney",
+    "New Zealand Standard Time": "Pacific/Auckland",
+}
+
+
 def unfold(text: str) -> list[str]:
-    """Split into logical lines, joining folded continuation lines (CRLF/LF + space or tab)."""
-    lines: list[str] = []
-    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if raw[:1] in (" ", "\t"):
-            if lines:
-                lines[-1] += raw[1:]
-        elif raw:
-            lines.append(raw)
-    return lines
+    """Split into logical lines, joining folded continuation lines (CRLF/LF + space or tab).
+
+    Linear in the input size (no repeated string concatenation).
+    """
+    text = _FOLD.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+    return [line for line in text.split("\n") if line and line[0] not in " \t"]
+
+
+def _zone(tzid: str) -> ZoneInfo | None:
+    """IANA zone for a TZID: IANA name, known Windows name, or a prefixed IANA path."""
+    name = tzid.strip().strip('"')
+    candidates = [WINDOWS_ZONES.get(name, name)]
+    parts = [p for p in name.split("/") if p]
+    if len(parts) > 2:  # e.g. "/mozilla.org/20050126_1/Europe/Berlin"
+        candidates += ["/".join(parts[-2:]), "/".join(parts[-3:])]
+    elif name.startswith("/"):
+        candidates.append("/".join(parts))
+    for candidate in candidates:
+        try:
+            return ZoneInfo(candidate)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            continue
+    return None
 
 
 def _split_outside_quotes(text: str, separator: str, maxsplit: int = -1) -> list[str]:
@@ -119,10 +171,10 @@ def parse_date_value(prop: Property) -> date | datetime | None:
         return moment.replace(tzinfo=UTC)
     tzid = prop.params.get("TZID")
     if tzid:
-        try:
-            return moment.replace(tzinfo=ZoneInfo(tzid.lstrip("/")))
-        except (ZoneInfoNotFoundError, ValueError, OSError):
-            return moment  # unknown zone name (e.g. a Windows name): keep it floating
+        zone = _zone(tzid)
+        if zone is not None:
+            return moment.replace(tzinfo=zone)
+        # unknown zone name (e.g. "(UTC+08:00) Taipei"): keep the time floating
     return moment
 
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from nextcloud_mcp_server.ical import (
+    WINDOWS_ZONES,
     Property,
     components,
     parse_date_value,
@@ -57,6 +59,26 @@ def test_unescape_text() -> None:
         ),
         (
             Property("DUE", {"TZID": "W. Europe Standard Time"}, "20261010T080000"),
+            datetime(2026, 10, 10, 8, tzinfo=ZoneInfo("Europe/Berlin")),
+        ),
+        (
+            Property("DUE", {"TZID": "Taipei Standard Time"}, "20261010T080000"),
+            datetime(2026, 10, 10, 8, tzinfo=ZoneInfo("Asia/Taipei")),
+        ),
+        (
+            Property("DUE", {"TZID": "/mozilla.org/20050126_1/Europe/Berlin"}, "20261010T080000"),
+            datetime(2026, 10, 10, 8, tzinfo=ZoneInfo("Europe/Berlin")),
+        ),
+        (
+            Property("DUE", {"TZID": "/Europe/Berlin"}, "20261010T080000"),
+            datetime(2026, 10, 10, 8, tzinfo=ZoneInfo("Europe/Berlin")),
+        ),
+        (
+            Property("DUE", {"TZID": "(UTC+08:00) Taipei"}, "20261010T080000"),
+            datetime(2026, 10, 10, 8),
+        ),
+        (
+            Property("DUE", {"TZID": "../../etc/passwd"}, "20261010T080000"),
             datetime(2026, 10, 10, 8),
         ),
         (Property("DUE", {"VALUE": "DATE"}, "2026-10-10"), None),
@@ -105,3 +127,17 @@ def test_components_nesting_and_broken_structure() -> None:
     assert todo["SUMMARY"].value == "first"
     assert "TRIGGER" not in todo
     assert todo["DUE"].value == "20261010"
+
+
+def test_windows_zone_table_is_valid() -> None:
+    for name in WINDOWS_ZONES.values():
+        ZoneInfo(name)
+
+
+def test_unfold_is_linear() -> None:
+    # 2 MB of one property folded every 2 characters took ~40 s with quadratic joining.
+    text = "DESCRIPTION:" + "\r\n x" * 700_000 + "\r\nUID:1\r\n"
+    started = time.perf_counter()
+    lines = unfold(text)
+    assert time.perf_counter() - started < 2
+    assert lines == ["DESCRIPTION:" + "x" * 700_000, "UID:1"]

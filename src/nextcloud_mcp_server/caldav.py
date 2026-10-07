@@ -7,11 +7,12 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .ical import Property, components, parse_date_value, parse_int, unescape_text
-from .webdav import APPLE_ICAL, CALDAV, DAV, DavResponse, tag
+from .webdav import APPLE_ICAL, CALDAV, DAV, DavResponse, parse_multistatus, tag
 
 ALL_COMPONENTS = ["VEVENT", "VJOURNAL", "VTODO"]
 DONE_STATUSES = frozenset({"COMPLETED", "CANCELLED"})
 DESCRIPTION_LIMIT = 500
+MAX_OBJECT_CHARS = 1024 * 1024  # calendar objects larger than this are skipped
 
 
 def href_last_segment(href: str) -> str:
@@ -95,7 +96,12 @@ def _date(props: dict[str, Property], name: str) -> date | datetime | None:
 
 
 def parse_tasks(calendar_id: str, ics: str) -> list[dict[str, Any]]:
-    """Tasks (VTODO) of one calendar object resource; unreadable parts are skipped."""
+    """Tasks (VTODO) of one calendar object resource; unreadable parts are skipped.
+
+    Recurrence rules are not expanded: a recurring task is listed once with the dates of
+    its master component (the first occurrence). Objects that contain only overridden
+    instances (RECURRENCE-ID) and no master yield no task.
+    """
     tasks: list[dict[str, Any]] = []
     for props in components(ics, "VTODO"):
         if "RECURRENCE-ID" in props:
@@ -122,6 +128,25 @@ def parse_tasks(calendar_id: str, ics: str) -> list[dict[str, Any]]:
             }
         )
     return tasks
+
+
+def tasks_from_report(calendar_id: str, body: bytes) -> tuple[list[dict[str, Any]], int]:
+    """Tasks of a ``calendar-query`` REPORT answer and the number of skipped large objects.
+
+    CPU-bound; callers run it in a worker thread for large answers.
+    """
+    tasks: list[dict[str, Any]] = []
+    skipped = 0
+    for item in parse_multistatus(body):
+        data = item.props.get(tag(CALDAV, "calendar-data"))
+        text = data.text if data is not None else None
+        if not text or not text.strip():
+            continue
+        if len(text) > MAX_OBJECT_CHARS:
+            skipped += 1
+            continue
+        tasks.extend(parse_tasks(calendar_id, text))
+    return tasks, skipped
 
 
 def is_done(task: dict[str, Any]) -> bool:
