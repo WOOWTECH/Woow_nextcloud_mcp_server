@@ -1,0 +1,169 @@
+"""WebDAV / CalDAV request bodies and multistatus parsing (RFC 4918, RFC 4791)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC
+from email.utils import parsedate_to_datetime
+from typing import Any
+from xml.etree.ElementTree import Element
+
+from defusedxml import ElementTree as SafeET
+from defusedxml.common import DefusedXmlException
+from fastmcp.exceptions import ToolError
+
+from .paths import normalize_etag
+
+DAV = "DAV:"
+CALDAV = "urn:ietf:params:xml:ns:caldav"
+CALSERVER = "http://calendarserver.org/ns/"
+APPLE_ICAL = "http://apple.com/ns/ical/"
+SABRE = "http://sabredav.org/ns"
+
+
+def tag(namespace: str, name: str) -> str:
+    """Clark notation ``{namespace}name``."""
+    return f"{{{namespace}}}{name}"
+
+
+FILE_PROPFIND = (
+    b'<?xml version="1.0" encoding="utf-8"?>'
+    b'<d:propfind xmlns:d="DAV:"><d:prop>'
+    b"<d:resourcetype/><d:getcontentlength/><d:getlastmodified/>"
+    b"<d:getetag/><d:getcontenttype/>"
+    b"</d:prop></d:propfind>"
+)
+
+ETAG_PROPFIND = (
+    b'<?xml version="1.0" encoding="utf-8"?>'
+    b'<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:propfind>'
+)
+
+CALENDAR_PROPFIND = (
+    b'<?xml version="1.0" encoding="utf-8"?>'
+    b'<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"'
+    b' xmlns:cs="http://calendarserver.org/ns/" xmlns:a="http://apple.com/ns/ical/">'
+    b"<d:prop><d:displayname/><d:resourcetype/><c:supported-calendar-component-set/>"
+    b"<a:calendar-color/><d:current-user-privilege-set/><cs:getctag/></d:prop>"
+    b"</d:propfind>"
+)
+
+TODO_REPORT = (
+    b'<?xml version="1.0" encoding="utf-8"?>'
+    b'<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+    b"<d:prop><d:getetag/><c:calendar-data/></d:prop>"
+    b'<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VTODO"/>'
+    b"</c:comp-filter></c:filter>"
+    b"</c:calendar-query>"
+)
+
+
+@dataclass
+class DavResponse:
+    """One ``<d:response>`` of a multistatus: href, status and the props found (200 only)."""
+
+    href: str
+    status: int | None = None
+    props: dict[str, Element] = field(default_factory=dict)
+
+    def text(self, name: str) -> str | None:
+        element = self.props.get(name)
+        if element is None:
+            return None
+        value = (element.text or "").strip()
+        return value or None
+
+    def has_child(self, prop: str, child: str) -> bool:
+        element = self.props.get(prop)
+        return element is not None and element.find(child) is not None
+
+
+def _status_code(text: str | None) -> int | None:
+    # "HTTP/1.1 200 OK"
+    if not text:
+        return None
+    parts = text.split()
+    if len(parts) >= 2 and parts[1].isdigit():
+        return int(parts[1])
+    return None
+
+
+def parse_xml(body: bytes) -> Element:
+    """Parse untrusted XML with defusedxml (no DTDs, no entities, no external refs)."""
+    try:
+        return SafeET.fromstring(body, forbid_dtd=True)
+    except (DefusedXmlException, SafeET.ParseError, ValueError) as exc:
+        raise ToolError("Nextcloud sent an answer that is not valid WebDAV XML.") from exc
+
+
+def parse_multistatus(body: bytes) -> list[DavResponse]:
+    """Parse a ``207 Multi-Status`` body into :class:`DavResponse` objects."""
+    root = parse_xml(body)
+    if root.tag != tag(DAV, "multistatus"):
+        raise ToolError("Nextcloud sent an answer that is not a WebDAV multistatus.")
+    results: list[DavResponse] = []
+    for response in root.findall(tag(DAV, "response")):
+        href = (response.findtext(tag(DAV, "href")) or "").strip()
+        if not href:
+            continue
+        item = DavResponse(href=href, status=_status_code(response.findtext(tag(DAV, "status"))))
+        for propstat in response.findall(tag(DAV, "propstat")):
+            code = _status_code(propstat.findtext(tag(DAV, "status")))
+            prop = propstat.find(tag(DAV, "prop"))
+            if prop is None:
+                continue
+            if code is not None and not 200 <= code < 300:
+                continue
+            if item.status is None:
+                item.status = code
+            for child in prop:
+                item.props[child.tag] = child
+        results.append(item)
+    return results
+
+
+def server_message(body: bytes) -> str | None:
+    """Extract ``<s:message>`` from a Sabre error body, truncated to 200 characters."""
+    if not body or len(body) > 65536:
+        return None
+    try:
+        root = SafeET.fromstring(body, forbid_dtd=True)
+    except Exception:
+        return None
+    message = root.findtext(tag(SABRE, "message"))
+    if not message:
+        return None
+    message = " ".join(message.split())
+    return message[:200] or None
+
+
+def http_date_to_iso(value: str | None) -> str | None:
+    """RFC 1123 date (``getlastmodified``) to ISO 8601 UTC, e.g. ``2026-10-07T12:00:00Z``."""
+    if not value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def file_entry(item: DavResponse, path: str) -> dict[str, Any]:
+    """Build a file tree entry from a PROPFIND response."""
+    is_folder = item.has_child(tag(DAV, "resourcetype"), tag(DAV, "collection"))
+    size_text = item.text(tag(DAV, "getcontentlength"))
+    try:
+        size = int(size_text) if size_text is not None else None
+    except ValueError:
+        size = None
+    return {
+        "path": path,
+        "name": path.rsplit("/", 1)[-1] if path else "",
+        "type": "folder" if is_folder else "file",
+        "size": size,
+        "modified": http_date_to_iso(item.text(tag(DAV, "getlastmodified"))),
+        "etag": normalize_etag(item.text(tag(DAV, "getetag"))),
+        "content_type": item.text(tag(DAV, "getcontenttype")),
+    }
