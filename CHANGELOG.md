@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.1.2 - 2026-10-08
+
+### Added
+
+- Authentication latch (brute-force protection): after the first `401` or `429` from
+  Nextcloud, every tool call and probe fails at once with the same message and nothing
+  more is sent until the process restarts. The 401 message now says to fix the
+  credentials and restart; the 429 message explains the throttling (no BASE_URL hint).
+- `NextcloudClient.probe()` (also reachable as `server.nextcloud_client.probe()`): one
+  OCS `cloud/user` request returning `{"ok": True, "user_id": ...}` for gateway health
+  checks. It is not an MCP tool.
+- README: brute-force protection notes (stop before revoking the app password,
+  `occ security:bruteforce:reset <ip>`, whitelisting the gateway IP).
+
+### Fixed
+
+- Errors raised while building the HTTP client (for example a gateway hook refusing the
+  base URL) go through the normal error mapping for tools and the probe.
+- `get_file_tree` with depth 2-3 skips a sub-folder the gateway refuses (e.g. a name
+  with `%`), sets `truncated=true` and lists the rest, instead of failing completely.
+- Tests: the fake server answers 428 to an unconditional PUT over an existing file, and
+  a test proves `upload_file` without `expected_etag` never overwrites.
+
 ## 0.1.1 - 2026-10-08
 
 ### Fixed

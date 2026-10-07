@@ -182,6 +182,23 @@ loopback 時回應 `403`。WOOW 閘道在轉送前會把 `Host` 改寫成 `127.0
 掛鉤在啟動時就解析：沒有這個模組時使用一般的 `httpx.AsyncClient`；模組匯入失敗或沒有可呼叫的
 `async_client` 時，伺服器以狀態碼 2 停止，閘道的政策絕不會被默默略過。
 
+**健康檢查探測（不是 MCP 工具）。** `create_server()` 回傳的 FastMCP 伺服器附有 client；
+`await server.nextcloud_client.probe()` 只送一次帶驗證的 OCS `cloud/user` 請求（不讀任何檔案或
+行事曆資料），成功時回傳 `{"ok": True, "user_id": "<id>"}`，失敗時丟出與工具相同的
+`ToolError`。成本很低，適合定期健康檢查；它與工具共用使用者 id 快取與下述的驗證鎖存，
+也不會出現在 `tools/list`。
+
+## 暴力破解防護
+
+Nextcloud 的暴力破解防護會依來源 IP 累計每一次登入失敗，之後對該 IP 限速（HTTP 429）或
+封鎖，連同一 IP 的網頁登入與其他用戶端也會受影響。為避免這種情況，伺服器收到第一個
+`401` 或 `429` 後就會**鎖存**：之後每次工具呼叫與探測都立即以相同訊息失敗，不再連線到
+Nextcloud，直到伺服器行程重新啟動（WOOW 閘道在連線設定變更時會重啟它）。
+
+* 撤銷或更換應用程式密碼**之前**，請先停止 MCP 伺服器（或閘道 add-on），更新密碼後再啟動。
+* 若 IP 已被限速，管理員可以用 `occ security:bruteforce:reset <ip>` 重設。
+* 可考慮在「Brute-force settings」App（`bruteforcesettings`）把閘道的 IP 加入白名單。
+
 ## 行為說明
 
 * **ETag** 回傳時不含引號也不含 `W/` 前綴；傳回伺服器時加不加引號都可以。寫入時送出
@@ -192,6 +209,8 @@ loopback 時回應 `403`。WOOW 閘道在轉送前會把 `Host` 改寫成 `127.0
   BOM 會從 `content` 移除，但仍計入 `bytes`。
 * **刪除**的檔案在啟用「已刪除的檔案」App 時會移到 Nextcloud 垃圾桶。
 * **重新導向**一律不跟隨：請把 `NEXTCLOUD_MCP_BASE_URL` 設成最終網址。
+* **樹狀列表**（`depth` 2–3）會略過已消失、無法讀取（403／404）或被閘道拒絕（例如名稱含
+  `%` 的資料夾）的子資料夾；被拒絕時也會設 `truncated=true`，其餘部分照常列出。
 * **錯誤**是簡短的英文訊息（MCP 中 `isError: true`），絕不包含密碼、`Authorization`
   標頭或冗長的伺服器回應內容。
 * **路徑**含控制字元（C0、DEL、C1）、雙向文字覆寫／隔離字元、`.`／`..` 區段、空區段或

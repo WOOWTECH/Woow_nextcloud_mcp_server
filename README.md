@@ -196,6 +196,29 @@ a path containing `%`) is reported as `The gateway refused this request for "<p>
 `async_client` stops the server with exit status 2, so a gateway's policy can never be
 skipped silently.
 
+**Health probe (not an MCP tool).** `create_server()` returns a FastMCP server with the
+client attached; `await server.nextcloud_client.probe()` sends one authenticated OCS
+`cloud/user` request (no file or calendar data) and returns
+`{"ok": True, "user_id": "<id>"}`, or raises the same `ToolError` a tool would. It is
+cheap enough for periodic health checks, shares the user-id cache and the authentication
+latch below, and is never listed in `tools/list`.
+
+## Brute-force protection
+
+Nextcloud's brute-force protection counts every failed login per client IP and then
+throttles (HTTP 429) or blocks that IP, including web logins and other clients behind the
+same address. To avoid this, the server **latches** the first `401` or `429` it gets:
+from then on every tool call and every probe fails at once with the same message, without
+contacting Nextcloud, until the server process is restarted (WOOW gateways restart it
+when the connection settings change).
+
+* Stop the MCP server (or the gateway add-on) **before** revoking or rotating its app
+  password, then update the password and start it again.
+* If the IP was throttled anyway, an administrator can reset it with
+  `occ security:bruteforce:reset <ip>`.
+* Consider whitelisting the gateway's IP in the *Brute-force settings* app
+  (`bruteforcesettings`).
+
 ## Behaviour notes
 
 * **ETags** are returned without quotes or `W/` prefix and may be passed back with or
@@ -208,6 +231,9 @@ skipped silently.
   `bytes`.
 * **Deletes** go to the Nextcloud trash bin when the *Deleted files* app is enabled.
 * **Redirects** are never followed: set `NEXTCLOUD_MCP_BASE_URL` to the final address.
+* **Tree listings** (`depth` 2-3) skip sub-folders that vanished, are not readable (403/404)
+  or that a gateway refuses (for example a folder name containing `%`); a refused folder
+  also sets `truncated=true`, and the rest of the tree is still listed.
 * **Errors** are short English messages (`isError: true` in MCP) that never contain the
   password, the `Authorization` header or long server bodies.
 * **Paths** with control characters (C0, DEL, C1), bidirectional override/isolate
