@@ -25,6 +25,8 @@ P = "Docs/a #1.md"
         (405, "update", f'"{P}" is a folder or cannot be written.'),
         (405, "upload_create", f'"{P}" is a folder or cannot be written.'),
         (409, "create", f'The parent folder of "{P}" does not exist.'),
+        (404, "create", f'The parent folder of "{P}" does not exist.'),
+        (404, "upload_create", f'The parent folder of "{P}" does not exist.'),
         (409, "upload_replace", f'The parent folder of "{P}" does not exist.'),
         (
             412,
@@ -107,6 +109,8 @@ async def test_tool_level_mapping(
     message = str(info.value)
     if tool == "tree" and status == 404:
         assert message == f'"{P}" does not exist.'
+    elif tool == "create" and status == 404:
+        assert message == f'The parent folder of "{P}" does not exist.'
     else:
         assert fragment in message
     assert "zzzz" not in message  # never echo raw server bodies

@@ -183,7 +183,7 @@ class FakeNextcloud:
                 return httpx.Response(405)
             parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
             if parent not in self.folders:
-                return httpx.Response(409)
+                return httpx.Response(404)  # what Nextcloud 35 answers (not 409)
             if request.headers.get("If-None-Match") == "*" and exists_file:
                 return httpx.Response(412)
             if_match = request.headers.get("If-Match")

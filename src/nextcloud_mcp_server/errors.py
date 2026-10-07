@@ -50,6 +50,9 @@ def status_message(
         return AUTH_MESSAGE
     if status == 403:
         return f'Permission denied for "{label}".'
+    if status == 404 and op in ("create", "upload_create"):
+        # Nextcloud (verified on 35) answers 404, not 409, when the parent folder is missing.
+        return f'The parent folder of "{label}" does not exist.'
     if status == 404:
         return f'"{label}" does not exist.'
     if status == 405 and op in ("create", "update", "upload_create", "upload_replace"):
