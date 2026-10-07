@@ -31,6 +31,10 @@ The behaviour is specified in [SPEC.md](SPEC.md).
 | `upload_file` | `READONLY=false` | Upload base64 bytes: create only, or replace a given etag. |
 | `delete_file_checked` | `READONLY=false` and `ALLOW_DELETE=true` | Delete one file (not a folder) if the etag matches; it goes to the trash bin. |
 
+`update_text_file`, `upload_file` and `delete_file_checked` carry the MCP
+`destructiveHint` (they replace or remove content); all tools are `idempotentHint` because
+every write is guarded by an ETag condition.
+
 Any tool can additionally be hidden with `NEXTCLOUD_MCP_DISABLED_TOOLS`. Folder creation,
 moves and copies are out of scope in 0.1. Paths are relative to the account's home folder
 (`""` or `/` is the home) and are never percent-encoded by the caller.
@@ -47,15 +51,18 @@ environment wins):
 | `NEXTCLOUD_MCP_APP_PASSWORD` | required | App password of the account (treated as a secret everywhere). |
 | `NEXTCLOUD_MCP_READONLY` | `true` | When true, only the read tools are registered. |
 | `NEXTCLOUD_MCP_ALLOW_DELETE` | `false` | Registers `delete_file_checked` (only when `READONLY=false`). |
-| `NEXTCLOUD_MCP_DISABLED_TOOLS` | empty | Comma-separated tool names that are never registered. |
+| `NEXTCLOUD_MCP_DISABLED_TOOLS` | empty | Comma-separated tool names that are never registered. An unknown name stops the server (exit 2), so a typo cannot leave a tool enabled. |
 | `NEXTCLOUD_MCP_REQUEST_TIMEOUT` | `30` | Read timeout per backend request, seconds (connect timeout is 10 s). |
 | `NEXTCLOUD_MCP_MAX_TEXT_BYTES` | `1048576` | Largest file the text tools return, and largest text they write. |
 | `NEXTCLOUD_MCP_MAX_UPLOAD_BYTES` | `10485760` | Largest decoded `upload_file` payload. |
 | `NEXTCLOUD_MCP_TREE_MAX_ENTRIES` | `500` | Maximum entries returned by `get_file_tree`. |
-| `NEXTCLOUD_MCP_VERIFY_TLS` | `true` | TLS certificate verification. |
+| `NEXTCLOUD_MCP_VERIFY_TLS` | `true` | TLS certificate verification. `false` logs a warning at start-up; prefer `CA_BUNDLE`. |
+| `NEXTCLOUD_MCP_CA_BUNDLE` | empty | Path to a PEM file with the CA certificate(s) to trust, for a server with a private CA. |
+| `NEXTCLOUD_MCP_ALLOWED_HOSTS` | empty | Extra `Host` header values the `http`/`sse` transports accept, comma separated (`*.example.com` patterns allowed). See below. |
 
-If a required setting is missing or invalid the server exits with status 2 and a one-line
-message naming the variable (never its value).
+If a required setting is missing or invalid, or `backend_policy` (see below) is unusable,
+the server exits with status 2 and a one-line message naming the variable (never its
+value). An `http://` base URL or `VERIFY_TLS=false` is allowed but logs a warning.
 
 ## Create a dedicated account and an app password
 
@@ -156,27 +163,40 @@ WOOW admin gateways start the server as a child process and own the public endpo
 bearer/URL token, the admin UI and the per-tool policy:
 
 ```sh
-FASTMCP_SHOW_SERVER_BANNER=false FASTMCP_CHECK_FOR_UPDATES=off \
-  nextcloud-mcp-server --transport http --host 127.0.0.1 --port 3000 --path /mcp
+nextcloud-mcp-server --transport http --host 127.0.0.1 --port 3000 --path /mcp
 ```
+
+The FastMCP banner and update check are off unless `FASTMCP_SHOW_SERVER_BANNER` /
+`FASTMCP_CHECK_FOR_UPDATES` are set explicitly.
 
 The server binds only to the given host and has no authentication of its own, so keep it
 on `127.0.0.1` behind the gateway.
 
-**`backend_policy` hook.** If a Python module named `backend_policy` is importable and has
-a callable `async_client(*, base_url, **kwargs)`, the server builds its single
-`httpx.AsyncClient` with it (it receives the same keyword arguments the server would use:
+**Host and Origin checks (DNS-rebinding protection).** The `http` and `sse` transports
+answer `421 Misdirected Request` when the `Host` header is not `localhost`, `127.0.0.1`,
+`::1`, the bound address or a name in `NEXTCLOUD_MCP_ALLOWED_HOSTS` (ports are ignored),
+and `403` when a browser sends an `Origin` that is neither the same origin nor loopback.
+WOOW gateways rewrite `Host` to `127.0.0.1:<port>` and drop `Origin` before proxying, so
+they need no extra setting. A proxy that forwards the public `Host` unchanged must list
+that name, e.g. `NEXTCLOUD_MCP_ALLOWED_HOSTS=mcp.example.com`.
+
+**`backend_policy` hook.** If a Python module named `backend_policy` can be imported, it
+must provide a callable `async_client(*, base_url, **kwargs)`; the server then builds its
+single `httpx.AsyncClient` with it (passing the same keyword arguments it would use itself:
 Basic auth, `follow_redirects=False`, `trust_env=False`, timeouts, TLS verification and
-the `User-Agent`). Gateways use this to pin DNS and forbid redirects. Without the module a
-plain `httpx.AsyncClient` is used. A module that exists but fails to import is reported as
-an error rather than silently ignored.
+the `User-Agent`) and logs one info line at start-up. Gateways use this to pin DNS and
+forbid redirects. The hook is resolved at start-up: without the module a plain
+`httpx.AsyncClient` is used; a module that fails to import or has no callable
+`async_client` stops the server with exit status 2, so a gateway's policy can never be
+skipped silently.
 
 ## Behaviour notes
 
 * **ETags** are returned without quotes or `W/` prefix and may be passed back with or
   without quotes. Writes send `If-Match: "<etag>"` (or `If-None-Match: *` for creation).
-  A conflict answers with the current etag; the model should read the file again instead
-  of retrying blindly.
+  Only ASCII etag characters (RFC 9110 `etagc`) are accepted. A conflict answers with the
+  current etag (or says the file no longer exists); the model should read the file again
+  instead of retrying blindly.
 * **Text files** must be valid UTF-8 without NUL bytes and not larger than
   `MAX_TEXT_BYTES`. A UTF-8 byte-order mark is removed from `content` but counted in
   `bytes`.
@@ -184,9 +204,22 @@ an error rather than silently ignored.
 * **Redirects** are never followed: set `NEXTCLOUD_MCP_BASE_URL` to the final address.
 * **Errors** are short English messages (`isError: true` in MCP) that never contain the
   password, the `Authorization` header or long server bodies.
+* **Paths** with control characters (C0, DEL, C1), bidirectional override/isolate
+  characters, `.`/`..` segments, empty segments or backslashes are refused. Paths returned
+  by the server pass the same checks; entries that fail are left out and never followed.
+  If no path in a listing lies under the account's WebDAV folder (a reverse proxy or
+  `overwritewebroot` mismatch) the tool says so instead of returning an empty listing.
+* **Large answers**: WebDAV/CalDAV answers are capped at 8 MiB; large answers are parsed
+  in a worker thread so the server stays responsive.
 * **Tasks**: `include_completed=false` hides tasks with `STATUS:COMPLETED` or
   `STATUS:CANCELLED`, and tasks that have a `COMPLETED` date but no status. Dates are ISO
-  8601; date-only values stay `YYYY-MM-DD`; UTC times end in `Z`.
+  8601; date-only values stay `YYYY-MM-DD`; UTC times end in `Z`. Recurrence rules
+  (`RRULE`) are **not expanded**: a recurring task appears once with the due/start of its
+  first occurrence, and objects that contain only changed occurrences (`RECURRENCE-ID`
+  without the master) are skipped. Calendar objects over 1 MiB are skipped and counted in
+  `skipped_large_objects`. `TZID`s that are IANA names, common Windows/Outlook names
+  (e.g. `W. Europe Standard Time`, `Taipei Standard Time`) or prefixed IANA paths are
+  honoured; any other `TZID` leaves the time floating (no offset).
 
 ## Development
 
