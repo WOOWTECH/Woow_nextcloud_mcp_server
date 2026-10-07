@@ -101,3 +101,10 @@ def network_message(exc: httpx.TransportError) -> str:
     else:
         reason = f"network error {type(exc).__name__}"
     return f"Could not reach Nextcloud ({reason})."
+
+
+def http_error_message(exc: Exception) -> str:
+    """Message for any httpx failure: transport problems or an unreadable answer."""
+    if isinstance(exc, httpx.TransportError):
+        return network_message(exc)
+    return f"Nextcloud returned an error ({type(exc).__name__}); try again later."

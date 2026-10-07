@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ssl
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, ValidationError, field_validator
@@ -37,6 +39,8 @@ class Settings(BaseSettings):
     max_upload_bytes: int = Field(default=10_485_760, ge=1)
     tree_max_entries: int = Field(default=500, ge=1)
     verify_tls: bool = True
+    ca_bundle: str | None = None
+    allowed_hosts: str = ""
 
     @field_validator("base_url")
     @classmethod
@@ -82,10 +86,74 @@ class Settings(BaseSettings):
             raise ValueError("must not contain control characters")
         return value
 
+    @field_validator("disabled_tools")
+    @classmethod
+    def _check_disabled_tools(cls, value: str) -> str:
+        from .tools import ALL_TOOLS  # local import: tools imports this module
+
+        unknown = sorted(set(_split(value)) - set(ALL_TOOLS))
+        if unknown:
+            raise ValueError(f"unknown tool name(s) {', '.join(unknown)}")
+        return value
+
+    @field_validator("ca_bundle")
+    @classmethod
+    def _check_ca_bundle(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        path = Path(value.strip()).expanduser()
+        if not path.is_file():
+            raise ValueError("is not a readable file")
+        try:
+            ssl.create_default_context(cafile=str(path))
+        except (OSError, ssl.SSLError):
+            raise ValueError("is not a valid PEM CA bundle") from None
+        return str(path)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _check_allowed_hosts(cls, value: str) -> str:
+        for host in _split(value):
+            if any(ch in host for ch in "/@?# ") or any(ord(ch) < 0x21 for ch in host):
+                raise ValueError("must be host names (or patterns like *.example.com) only")
+        return value
+
     @property
     def disabled_tool_names(self) -> frozenset[str]:
         """Names from ``DISABLED_TOOLS`` (comma separated, blanks ignored)."""
-        return frozenset(part.strip() for part in self.disabled_tools.split(",") if part.strip())
+        return frozenset(_split(self.disabled_tools))
+
+    @property
+    def allowed_host_names(self) -> list[str]:
+        """Extra Host header values accepted by the HTTP/SSE transports."""
+        return _split(self.allowed_hosts)
+
+    def tls_verify(self) -> bool | ssl.SSLContext:
+        """Value for httpx ``verify``: False, a context for CA_BUNDLE, or True."""
+        if not self.verify_tls:
+            return False
+        if self.ca_bundle:
+            return ssl.create_default_context(cafile=self.ca_bundle)
+        return True
+
+    def startup_warnings(self) -> list[str]:
+        """Risky but allowed settings, logged once at start-up (no secrets)."""
+        warnings = []
+        if not self.verify_tls:
+            warnings.append(
+                "NEXTCLOUD_MCP_VERIFY_TLS=false: TLS certificates are not verified; prefer "
+                "NEXTCLOUD_MCP_CA_BUNDLE for a private CA."
+            )
+        if self.base_url.startswith("http://"):
+            warnings.append(
+                "NEXTCLOUD_MCP_BASE_URL uses http://: the app password is sent unencrypted; "
+                "use this only on a trusted network."
+            )
+        return warnings
+
+
+def _split(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
 
 
 def _describe(error: ValidationError) -> str:

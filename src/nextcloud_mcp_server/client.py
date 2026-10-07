@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
@@ -15,7 +16,13 @@ import httpx
 from fastmcp.exceptions import ToolError
 
 from . import __version__
-from .errors import AUTH_MESSAGE, NextcloudHTTPError, Operation, network_message, status_message
+from .errors import (
+    AUTH_MESSAGE,
+    NextcloudHTTPError,
+    Operation,
+    http_error_message,
+    status_message,
+)
 from .paths import encode_path
 from .settings import Settings
 from .webdav import server_message
@@ -24,16 +31,32 @@ logger = logging.getLogger("nextcloud_mcp_server")
 
 USER_AGENT = f"woow-nextcloud-mcp-server/{__version__}"
 CONNECT_TIMEOUT = 10.0
-MAX_XML_BYTES = 32 * 1024 * 1024
+MAX_XML_BYTES = 8 * 1024 * 1024
 MAX_ERROR_BODY = 64 * 1024
 
+PolicyFactory = Callable[..., Any]
+# Everything httpx raises for a failed exchange (StreamError and InvalidURL are not
+# HTTPError subclasses).
+_HTTPX_ERRORS = (httpx.HTTPError, httpx.StreamError, httpx.InvalidURL)
 
-class BodyTooLarge(Exception):
-    """The response body exceeded the cap given to :meth:`NextcloudClient.send`."""
 
-    def __init__(self, limit: int) -> None:
-        super().__init__(f"body larger than {limit} bytes")
+class BodyTooLarge(ToolError):
+    """The response body exceeded the cap given to :meth:`NextcloudClient.send`.
+
+    It is a :class:`ToolError`, so a caller that does not handle it still produces a
+    clean tool error; tools that want a more specific message catch it.
+    """
+
+    def __init__(self, limit: int, label: str | None = None) -> None:
+        target = f' for "{label}"' if label else ""
+        super().__init__(
+            f"Nextcloud's answer{target} is larger than {limit} bytes and was not processed."
+        )
         self.limit = limit
+
+
+class BackendPolicyError(Exception):
+    """The gateway's ``backend_policy`` module exists but cannot be used."""
 
 
 @dataclass
@@ -57,16 +80,34 @@ def _redirect_target(request_url: str, location: str | None) -> str:
     return f"{target.scheme}://{host}{port}{target.path}"
 
 
-def _load_backend_policy() -> Any | None:
-    """Return ``backend_policy.async_client`` when a gateway ships that module."""
+def load_backend_policy() -> PolicyFactory | None:
+    """Return ``backend_policy.async_client`` when a gateway ships that module.
+
+    ``None`` when no module named ``backend_policy`` exists. A module that exists but
+    fails to import, or has no callable ``async_client``, raises
+    :class:`BackendPolicyError`: a gateway that ships a policy must never silently get
+    an unrestricted client instead.
+    """
     try:
         module = importlib.import_module("backend_policy")
     except ModuleNotFoundError as exc:
         if exc.name == "backend_policy":
             return None
-        raise
+        raise BackendPolicyError(
+            f"backend_policy could not be imported ({type(exc).__name__}: missing module "
+            f"{exc.name!r})"
+        ) from None
+    except Exception as exc:
+        raise BackendPolicyError(
+            f"backend_policy could not be imported ({type(exc).__name__})"
+        ) from None
     factory = getattr(module, "async_client", None)
-    return factory if callable(factory) else None
+    if not callable(factory):
+        raise BackendPolicyError("backend_policy has no callable async_client(*, base_url, ...)")
+    return factory
+
+
+_UNSET: Any = object()
 
 
 class NextcloudClient:
@@ -77,9 +118,13 @@ class NextcloudClient:
         settings: Settings,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        policy: PolicyFactory | None = _UNSET,
     ) -> None:
+        """``policy`` defaults to :func:`load_backend_policy`, resolved here (at start-up)."""
         self.settings = settings
         self._transport = transport
+        self.policy: PolicyFactory | None = load_backend_policy() if policy is _UNSET else policy
+        self._verify = settings.tls_verify()
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._user_id: str | None = None
@@ -94,7 +139,7 @@ class NextcloudClient:
             "auth": httpx.BasicAuth(settings.username, settings.app_password.get_secret_value()),
             "follow_redirects": False,
             "trust_env": False,
-            "verify": settings.verify_tls,
+            "verify": self._verify,
             "timeout": httpx.Timeout(
                 settings.request_timeout,
                 connect=CONNECT_TIMEOUT,
@@ -111,13 +156,11 @@ class NextcloudClient:
             return self._client
         async with self._client_lock:
             if self._client is None:
-                factory = _load_backend_policy()
                 kwargs = self.client_kwargs()
-                if factory is not None:
-                    client = factory(base_url=self.settings.base_url, **kwargs)
+                if self.policy is not None:
+                    client = self.policy(base_url=self.settings.base_url, **kwargs)
                     if inspect.isawaitable(client):
                         client = await client
-                    logger.info("HTTP client built by backend_policy.async_client")
                 else:
                     client = httpx.AsyncClient(base_url=self.settings.base_url, **kwargs)
                 self._client = client
@@ -144,17 +187,18 @@ class NextcloudClient:
     ) -> Reply:
         """Send one request and return the size-capped body.
 
-        Raises :class:`ToolError` for transport failures and redirects,
+        Raises :class:`ToolError` for transport/protocol failures and redirects,
         :class:`NextcloudHTTPError` for statuses outside ``ok`` and :class:`BodyTooLarge`
-        when the body exceeds ``max_body`` bytes (default :data:`MAX_XML_BYTES`).
+        (also a ToolError) when the body exceeds ``max_body`` bytes (default
+        :data:`MAX_XML_BYTES`).
         """
         client = await self.http()
         try:
             request = client.build_request(method, url, headers=headers, content=content)
             response = await client.send(request, stream=True)
-        except httpx.TransportError as exc:
+        except _HTTPX_ERRORS as exc:
             logger.warning("%s request failed: %s", method, type(exc).__name__)
-            raise ToolError(network_message(exc)) from None
+            raise ToolError(http_error_message(exc)) from None
         try:
             logger.debug("%s -> %s", method, response.status_code)
             if 300 <= response.status_code < 400:
@@ -173,11 +217,14 @@ class NextcloudClient:
                     response.status_code,
                 )
             limit = MAX_XML_BYTES if max_body is None else max_body
-            body = await self._read_capped(response, limit)
+            try:
+                body = await self._read_capped(response, limit)
+            except BodyTooLarge:
+                raise BodyTooLarge(limit, label) from None
             return Reply(status=response.status_code, headers=response.headers, body=body)
-        except httpx.TransportError as exc:
+        except _HTTPX_ERRORS as exc:
             logger.warning("%s response failed: %s", method, type(exc).__name__)
-            raise ToolError(network_message(exc)) from None
+            raise ToolError(http_error_message(exc)) from None
         finally:
             await response.aclose()
 

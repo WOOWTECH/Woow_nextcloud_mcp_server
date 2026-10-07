@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import ssl
 import sys
 import types
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 import pytest
@@ -13,10 +15,13 @@ from fastmcp.exceptions import ToolError
 from fake_nextcloud import BASE_URL, LOGIN, PASSWORD, USER_ID, FakeNextcloud
 from nextcloud_mcp_server import __version__
 from nextcloud_mcp_server.client import (
+    MAX_XML_BYTES,
     USER_AGENT,
+    BackendPolicyError,
     BodyTooLarge,
     NextcloudClient,
     _redirect_target,
+    load_backend_policy,
 )
 from nextcloud_mcp_server.errors import NextcloudHTTPError, network_message
 from nextcloud_mcp_server.settings import Settings
@@ -253,23 +258,41 @@ async def test_backend_policy_async_factory(
     await nc.aclose()
 
 
-async def test_backend_policy_without_factory_falls_back(
-    monkeypatch: pytest.MonkeyPatch, settings: Settings, fake: FakeNextcloud
+@pytest.mark.parametrize(
+    ("source", "fragment"),
+    [
+        ("x = 1\n", "no callable async_client"),
+        ("async_client = 'not callable'\n", "no callable async_client"),
+        ("import module_that_does_not_exist_xyz\n", "missing module"),
+        ("raise RuntimeError('boom')\n", "could not be imported (RuntimeError)"),
+        ("def broken(:\n", "could not be imported (SyntaxError)"),
+    ],
+)
+def test_unusable_backend_policy_fails_at_construction(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, tmp_path, source: str, fragment: str
 ) -> None:
-    monkeypatch.setitem(sys.modules, "backend_policy", types.ModuleType("backend_policy"))
-    nc = NextcloudClient(settings, transport=fake.transport)
-    assert await nc.user_id() == USER_ID
-    await nc.aclose()
-
-
-async def test_backend_policy_broken_import_is_not_hidden(
-    monkeypatch: pytest.MonkeyPatch, settings: Settings, tmp_path
-) -> None:
-    (tmp_path / "backend_policy.py").write_text("import module_that_does_not_exist_xyz\n")
+    (tmp_path / "backend_policy.py").write_text(source)
     monkeypatch.syspath_prepend(str(tmp_path))
-    nc = NextcloudClient(settings)
-    with pytest.raises(ModuleNotFoundError):
-        await nc.http()
+    with pytest.raises(BackendPolicyError, match=re.escape(fragment)):
+        NextcloudClient(settings)
+
+
+def test_backend_policy_absent(settings: Settings) -> None:
+    assert load_backend_policy() is None
+    assert NextcloudClient(settings).policy is None
+
+
+async def test_explicit_policy_argument(settings: Settings, fake: FakeNextcloud) -> None:
+    used: list[str] = []
+
+    def factory(*, base_url: str, **kwargs):
+        used.append(base_url)
+        return httpx.AsyncClient(base_url=base_url, **kwargs)
+
+    nc = NextcloudClient(settings, transport=fake.transport, policy=factory)
+    await nc.user_id()
+    assert used == [BASE_URL]
+    await nc.aclose()
 
 
 def test_login_and_password_are_used(settings: Settings) -> None:
@@ -279,3 +302,55 @@ def test_login_and_password_are_used(settings: Settings) -> None:
 
     expected = base64.b64encode(f"{LOGIN}:{PASSWORD}".encode()).decode()
     assert request.headers["Authorization"] == f"Basic {expected}"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [httpx.DecodingError("bad gzip"), httpx.StreamConsumed(), httpx.InvalidURL("x")],
+)
+async def test_non_transport_httpx_errors_become_tool_errors(settings: Settings, exc) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise exc
+
+    nc = _client(settings, handler)
+    with pytest.raises(ToolError) as info:
+        await nc.send("GET", BASE_URL + "/x", label="x", op="read")
+    assert (
+        str(info.value) == f"Nextcloud returned an error ({type(exc).__name__}); try again later."
+    )
+
+
+async def test_decoding_error_while_reading_body(settings: Settings) -> None:
+    nc = _client(
+        settings,
+        lambda r: httpx.Response(200, content=b"not gzip", headers={"Content-Encoding": "gzip"}),
+    )
+    with pytest.raises(ToolError, match=r"Nextcloud returned an error \(DecodingError\)"):
+        await nc.send("GET", BASE_URL + "/x", label="x", op="read")
+
+
+async def test_body_too_large_is_a_tool_error_with_label(settings: Settings) -> None:
+    nc = _client(settings, lambda r: httpx.Response(200, content=b"abcdef"))
+    with pytest.raises(ToolError) as info:
+        await nc.send("PUT", BASE_URL + "/x", label="Docs/x.txt", op="create", max_body=3)
+    assert isinstance(info.value, BodyTooLarge)
+    assert str(info.value) == (
+        'Nextcloud\'s answer for "Docs/x.txt" is larger than 3 bytes and was not processed.'
+    )
+
+
+def test_xml_cap_is_8_mib() -> None:
+    assert MAX_XML_BYTES == 8 * 1024 * 1024
+
+
+def test_ca_bundle_builds_ssl_context(make_settings, tmp_path) -> None:
+    import ssl
+
+    import certifi
+
+    bundle = tmp_path / "ca.pem"
+    bundle.write_bytes(Path(certifi.where()).read_bytes())
+    nc = NextcloudClient(make_settings(ca_bundle=str(bundle)))
+    assert isinstance(nc.client_kwargs()["verify"], ssl.SSLContext)
+    insecure = NextcloudClient(make_settings(ca_bundle=str(bundle), verify_tls=False))
+    assert insecure.client_kwargs()["verify"] is False

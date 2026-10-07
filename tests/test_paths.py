@@ -140,3 +140,35 @@ def test_caller_etag() -> None:
 
 def test_quote_etag() -> None:
     assert quote_etag("abc") == '"abc"'
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "a\x80b",
+        "a\x9fb",
+        "invoice‮gpj.exe",
+        "a‪b",
+        "a⁦b",
+        "a⁩b",
+    ],
+)
+def test_normalize_rejects_c1_and_bidi_controls(raw: str) -> None:
+    with pytest.raises(ToolError):
+        normalize_path(raw)
+
+
+def test_normalize_keeps_other_unicode() -> None:
+    value = f"a{chr(0xA0)}b/{chr(0x200B)}c/é"
+    assert normalize_path(value) == value
+
+
+@pytest.mark.parametrize("bad", ["é", "a b", "a\x7f", "a\x80", "日本"])
+def test_caller_etag_must_be_etagc_ascii(bad: str) -> None:
+    with pytest.raises(ToolError, match="not a valid etag"):
+        caller_etag(bad)
+
+
+def test_caller_etag_accepts_all_etagc() -> None:
+    value = "!" + "".join(chr(c) for c in range(0x23, 0x7F))
+    assert caller_etag(value) == value

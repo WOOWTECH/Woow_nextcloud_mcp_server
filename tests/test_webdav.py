@@ -62,14 +62,12 @@ def test_parse_multistatus_namespaced_with_404_propstat() -> None:
     assert [i.href for i in items] == [
         "/remote.php/dav/files/u/Docs/",
         "/remote.php/dav/files/u/Docs/a%20%231.md",
-        "/remote.php/dav/files/u/gone.txt",
         "/remote.php/dav/files/u/odd",
-    ]
-    folder, doc, gone, odd = items
+    ]  # gone.txt has a response-level 404 and is left out
+    folder, doc, odd = items
     assert folder.status == 200
     assert tag(DAV, "getcontentlength") not in folder.props  # only the 404 propstat had it
     assert folder.has_child(tag(DAV, "resourcetype"), tag(DAV, "collection"))
-    assert gone.status == 404 and gone.props == {}
     assert doc.text(tag(DAV, "getcontentlength")) == "42"
     assert doc.text(tag(DAV, "displayname")) is None
 

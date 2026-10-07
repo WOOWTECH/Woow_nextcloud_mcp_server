@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import sys
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
+import fastmcp
 import httpx
 from fastmcp import FastMCP
+from fastmcp.server.http import HostOriginGuardMiddleware
+from starlette.middleware import Middleware
 
 from . import __version__
-from .client import NextcloudClient
+from .client import BackendPolicyError, NextcloudClient
 from .settings import Settings, SettingsError, load_settings
 from .tools import register_tools
 
 SERVER_NAME = "Woow Nextcloud"
+
+logger = logging.getLogger("nextcloud_mcp_server")
 
 INSTRUCTIONS = "\n".join(
     (
@@ -39,8 +46,16 @@ def create_server(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastMCP:
-    """Build the MCP server for ``settings``. No request is sent to Nextcloud here."""
+    """Build the MCP server for ``settings``. No request is sent to Nextcloud here.
+
+    Raises :class:`BackendPolicyError` when a ``backend_policy`` module exists but is
+    unusable (resolved now, at start-up, not on the first tool call).
+    """
     nc = NextcloudClient(settings, transport=transport)
+    if nc.policy is not None:
+        logger.info("backend_policy.async_client will build the HTTP client")
+    for warning in settings.startup_warnings():
+        logger.warning(warning)
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncIterator[dict[str, Any]]:
@@ -86,21 +101,60 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _quiet_fastmcp_defaults() -> None:
+    """Default to no banner and no update check unless the environment says otherwise.
+
+    FastMCP reads its settings when it is imported, so the values are set on
+    ``fastmcp.settings`` as well as in the environment (for child processes).
+    """
+    if "FASTMCP_CHECK_FOR_UPDATES" not in os.environ:
+        os.environ["FASTMCP_CHECK_FOR_UPDATES"] = "off"
+        fastmcp.settings.check_for_updates = "off"
+    if "FASTMCP_SHOW_SERVER_BANNER" not in os.environ:
+        os.environ["FASTMCP_SHOW_SERVER_BANNER"] = "false"
+        fastmcp.settings.show_server_banner = False
+
+
+def http_guard(settings: Settings, host: str, transport: str = "http") -> dict[str, Any]:
+    """Host/Origin protection for the HTTP and SSE transports (DNS-rebinding defence).
+
+    FastMCP's guard in strict mode answers 421 to a Host header that is not localhost,
+    127.0.0.1, ::1, the bound address or one of NEXTCLOUD_MCP_ALLOWED_HOSTS (ports are
+    ignored, ``*`` patterns allowed), and 403 to a browser Origin that is neither
+    same-origin nor loopback. FastMCP 3.4.5 wires the guard only into the Streamable
+    HTTP app, so for SSE the same middleware is added explicitly.
+    """
+    allowed = list(settings.allowed_host_names)
+    if host not in ("0.0.0.0", "::", "") and host not in allowed:  # noqa: S104
+        allowed.append(host)
+    if transport == "sse":
+        guard = Middleware(HostOriginGuardMiddleware, allowed_hosts=allowed, mode="strict")
+        return {"middleware": [guard]}
+    return {"host_origin_protection": True, "allowed_hosts": allowed}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _quiet_fastmcp_defaults()
     try:
         settings = load_settings()
-    except SettingsError as exc:
+        server = create_server(settings)
+    except (SettingsError, BackendPolicyError) as exc:
         print(f"nextcloud-mcp-server: configuration error: {exc}", file=sys.stderr)
         return 2
-    server = create_server(settings)
     if args.transport == "stdio":
         server.run(transport="stdio")
     else:
         path = args.path or ("/mcp" if args.transport == "http" else "/sse")
         if not path.startswith("/"):
             path = "/" + path
-        server.run(transport=args.transport, host=args.host, port=args.port, path=path)
+        server.run(
+            transport=args.transport,
+            host=args.host,
+            port=args.port,
+            path=path,
+            **http_guard(settings, args.host, args.transport),
+        )
     return 0
 
 

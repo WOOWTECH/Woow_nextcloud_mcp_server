@@ -9,8 +9,19 @@ from fastmcp.exceptions import ToolError
 MAX_PATH_LENGTH = 1024
 
 
+# Bidirectional embedding/override (U+202A-U+202E) and isolate (U+2066-U+2069) controls can
+# make a path display differently from what it is ("Trojan Source" style spoofing).
+_BIDI_CONTROLS = frozenset(chr(c) for c in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)))
+
+
 def _has_control(text: str) -> bool:
-    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text)
+    """C0 controls, DEL and C1 controls (U+0080-U+009F)."""
+    return any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in text)
+
+
+def _is_etag_char(ch: str) -> bool:
+    """RFC 9110 etagc: %x21 / %x23-7E (obs-text is not accepted here)."""
+    return ch == "!" or "#" <= ch <= "~"
 
 
 def normalize_path(path: str) -> str:
@@ -25,6 +36,8 @@ def normalize_path(path: str) -> str:
         raise ToolError(f"path is longer than {MAX_PATH_LENGTH} characters.")
     if _has_control(path):
         raise ToolError("path must not contain control characters.")
+    if any(ch in _BIDI_CONTROLS for ch in path):
+        raise ToolError("path must not contain bidirectional override or isolate characters.")
     if "\\" in path:
         raise ToolError("path must use '/' as separator, not backslashes.")
     if path in ("", "/"):
@@ -87,7 +100,7 @@ def caller_etag(etag: str | None, argument: str = "expected_etag") -> str:
     value = normalize_etag(etag)
     if value is None:
         raise ToolError(f"{argument} must not be empty; read the file first to get its etag.")
-    if '"' in value or _has_control(value) or len(value) > 256:
+    if len(value) > 256 or not all(_is_etag_char(ch) for ch in value):
         raise ToolError(
             f"{argument} is not a valid etag; copy it exactly as a read tool returned it."
         )

@@ -97,7 +97,11 @@ def parse_xml(body: bytes) -> Element:
 
 
 def parse_multistatus(body: bytes) -> list[DavResponse]:
-    """Parse a ``207 Multi-Status`` body into :class:`DavResponse` objects."""
+    """Parse a ``207 Multi-Status`` body into :class:`DavResponse` objects.
+
+    Responses with a non-2xx response-level status are left out; within a response only
+    2xx propstats contribute properties.
+    """
     root = parse_xml(body)
     if root.tag != tag(DAV, "multistatus"):
         raise ToolError("Nextcloud sent an answer that is not a WebDAV multistatus.")
@@ -106,7 +110,11 @@ def parse_multistatus(body: bytes) -> list[DavResponse]:
         href = (response.findtext(tag(DAV, "href")) or "").strip()
         if not href:
             continue
-        item = DavResponse(href=href, status=_status_code(response.findtext(tag(DAV, "status"))))
+        status = _status_code(response.findtext(tag(DAV, "status")))
+        if status is not None and not 200 <= status < 300:
+            # e.g. a member that vanished (404) or cannot be read (403): not a resource here
+            continue
+        item = DavResponse(href=href, status=status)
         for propstat in response.findall(tag(DAV, "propstat")):
             code = _status_code(propstat.findtext(tag(DAV, "status")))
             prop = propstat.find(tag(DAV, "prop"))

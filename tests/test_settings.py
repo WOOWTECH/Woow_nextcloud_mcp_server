@@ -126,3 +126,45 @@ def test_bad_values_never_echo_input(monkeypatch: pytest.MonkeyPatch, key: str, 
     assert "pw-xyz" not in message
     if key == "APP_PASSWORD":
         assert "abc" not in message
+
+
+def test_unknown_disabled_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch, BASE_URL="https://c.example.com", USERNAME="a", APP_PASSWORD="pw")
+    _env(monkeypatch, DISABLED_TOOLS="upload_file, delete_file")
+    with pytest.raises(SettingsError, match="unknown tool name\\(s\\) delete_file"):
+        load_settings()
+
+
+def test_allowed_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch, BASE_URL="https://c.example.com", USERNAME="a", APP_PASSWORD="pw")
+    _env(monkeypatch, ALLOWED_HOSTS=" mcp.example.com, *.lan ,")
+    assert load_settings().allowed_host_names == ["mcp.example.com", "*.lan"]
+    _env(monkeypatch, ALLOWED_HOSTS="https://mcp.example.com/")
+    with pytest.raises(SettingsError, match="NEXTCLOUD_MCP_ALLOWED_HOSTS"):
+        load_settings()
+
+
+def test_ca_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import certifi
+
+    _env(monkeypatch, BASE_URL="https://c.example.com", USERNAME="a", APP_PASSWORD="pw")
+    good = tmp_path / "ca.pem"
+    good.write_bytes(Path(certifi.where()).read_bytes())
+    _env(monkeypatch, CA_BUNDLE=str(good))
+    assert load_settings().ca_bundle == str(good)
+    _env(monkeypatch, CA_BUNDLE=" ")
+    assert load_settings().ca_bundle is None
+    _env(monkeypatch, CA_BUNDLE=str(tmp_path / "missing.pem"))
+    with pytest.raises(SettingsError, match="NEXTCLOUD_MCP_CA_BUNDLE: is not a readable file"):
+        load_settings()
+    bad = tmp_path / "bad.pem"
+    bad.write_text("not a certificate")
+    _env(monkeypatch, CA_BUNDLE=str(bad))
+    with pytest.raises(SettingsError, match="not a valid PEM CA bundle"):
+        load_settings()
+
+
+def test_startup_warnings(make_settings) -> None:
+    assert make_settings().startup_warnings() == []
+    warnings = make_settings(verify_tls=False, base_url="http://lan.example").startup_warnings()
+    assert len(warnings) == 2
