@@ -1,0 +1,257 @@
+"""Nextcloud HTTP client: one ``httpx.AsyncClient`` per server lifetime, lazily created."""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import inspect
+import json
+import logging
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import quote, urljoin, urlsplit
+
+import httpx
+from fastmcp.exceptions import ToolError
+
+from . import __version__
+from .errors import AUTH_MESSAGE, NextcloudHTTPError, Operation, network_message, status_message
+from .paths import encode_path
+from .settings import Settings
+from .webdav import server_message
+
+logger = logging.getLogger("nextcloud_mcp_server")
+
+USER_AGENT = f"woow-nextcloud-mcp-server/{__version__}"
+CONNECT_TIMEOUT = 10.0
+MAX_XML_BYTES = 32 * 1024 * 1024
+MAX_ERROR_BODY = 64 * 1024
+
+
+class BodyTooLarge(Exception):
+    """The response body exceeded the cap given to :meth:`NextcloudClient.send`."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"body larger than {limit} bytes")
+        self.limit = limit
+
+
+@dataclass
+class Reply:
+    """A fully read (and size-capped) backend response."""
+
+    status: int
+    headers: httpx.Headers
+    body: bytes
+
+
+def _redirect_target(request_url: str, location: str | None) -> str:
+    if not location:
+        return "an unknown address"
+    try:
+        target = urlsplit(urljoin(request_url, location))
+        host = target.hostname or ""
+        port = f":{target.port}" if target.port else ""
+    except ValueError:
+        return "an unknown address"
+    return f"{target.scheme}://{host}{port}{target.path}"
+
+
+def _load_backend_policy() -> Any | None:
+    """Return ``backend_policy.async_client`` when a gateway ships that module."""
+    try:
+        module = importlib.import_module("backend_policy")
+    except ModuleNotFoundError as exc:
+        if exc.name == "backend_policy":
+            return None
+        raise
+    factory = getattr(module, "async_client", None)
+    return factory if callable(factory) else None
+
+
+class NextcloudClient:
+    """Thin async wrapper around the Nextcloud WebDAV/CalDAV/OCS endpoints of one account."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.settings = settings
+        self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
+        self._user_id: str | None = None
+        self._user_lock = asyncio.Lock()
+
+    # -- lifecycle -----------------------------------------------------------------
+
+    def client_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments used to build the HTTP client (plain or via ``backend_policy``)."""
+        settings = self.settings
+        kwargs: dict[str, Any] = {
+            "auth": httpx.BasicAuth(settings.username, settings.app_password.get_secret_value()),
+            "follow_redirects": False,
+            "trust_env": False,
+            "verify": settings.verify_tls,
+            "timeout": httpx.Timeout(
+                settings.request_timeout,
+                connect=CONNECT_TIMEOUT,
+            ),
+            "headers": {"User-Agent": USER_AGENT},
+        }
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        return kwargs
+
+    async def http(self) -> httpx.AsyncClient:
+        """Return the shared HTTP client, creating it on first use (no request is made)."""
+        if self._client is not None:
+            return self._client
+        async with self._client_lock:
+            if self._client is None:
+                factory = _load_backend_policy()
+                kwargs = self.client_kwargs()
+                if factory is not None:
+                    client = factory(base_url=self.settings.base_url, **kwargs)
+                    if inspect.isawaitable(client):
+                        client = await client
+                    logger.info("HTTP client built by backend_policy.async_client")
+                else:
+                    client = httpx.AsyncClient(base_url=self.settings.base_url, **kwargs)
+                self._client = client
+        return self._client
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
+
+    # -- requests ------------------------------------------------------------------
+
+    async def send(
+        self,
+        method: str,
+        url: str,
+        *,
+        label: str,
+        op: Operation,
+        headers: dict[str, str] | None = None,
+        content: bytes | None = None,
+        max_body: int | None = None,
+        ok: tuple[int, ...] = (200, 201, 204, 207),
+    ) -> Reply:
+        """Send one request and return the size-capped body.
+
+        Raises :class:`ToolError` for transport failures and redirects,
+        :class:`NextcloudHTTPError` for statuses outside ``ok`` and :class:`BodyTooLarge`
+        when the body exceeds ``max_body`` bytes (default :data:`MAX_XML_BYTES`).
+        """
+        client = await self.http()
+        try:
+            request = client.build_request(method, url, headers=headers, content=content)
+            response = await client.send(request, stream=True)
+        except httpx.TransportError as exc:
+            logger.warning("%s request failed: %s", method, type(exc).__name__)
+            raise ToolError(network_message(exc)) from None
+        try:
+            logger.debug("%s -> %s", method, response.status_code)
+            if 300 <= response.status_code < 400:
+                target = _redirect_target(str(request.url), response.headers.get("location"))
+                raise ToolError(
+                    f"Nextcloud answered with a redirect to {target}; "
+                    "set NEXTCLOUD_MCP_BASE_URL to the final address."
+                )
+            if response.status_code not in ok:
+                if response.status_code == 401:
+                    raise NextcloudHTTPError(AUTH_MESSAGE, 401)
+                body = await self._read_capped(response, MAX_ERROR_BODY, tolerate=True)
+                detail = server_message(body) if response.status_code < 500 else None
+                raise NextcloudHTTPError(
+                    status_message(response.status_code, label, op, detail=detail),
+                    response.status_code,
+                )
+            limit = MAX_XML_BYTES if max_body is None else max_body
+            body = await self._read_capped(response, limit)
+            return Reply(status=response.status_code, headers=response.headers, body=body)
+        except httpx.TransportError as exc:
+            logger.warning("%s response failed: %s", method, type(exc).__name__)
+            raise ToolError(network_message(exc)) from None
+        finally:
+            await response.aclose()
+
+    @staticmethod
+    async def _read_capped(
+        response: httpx.Response, limit: int, *, tolerate: bool = False
+    ) -> bytes:
+        length = response.headers.get("content-length")
+        if length is not None and length.isdigit() and int(length) > limit and not tolerate:
+            raise BodyTooLarge(limit)
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > limit:
+                if tolerate:
+                    break
+                raise BodyTooLarge(limit)
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    # -- account -------------------------------------------------------------------
+
+    async def user_id(self) -> str:
+        """The Nextcloud user id (may differ from the login name), resolved once."""
+        if self._user_id is not None:
+            return self._user_id
+        async with self._user_lock:
+            if self._user_id is None:
+                self._user_id = await self._fetch_user_id()
+        return self._user_id
+
+    async def _fetch_user_id(self) -> str:
+        url = f"{self.settings.base_url}/ocs/v2.php/cloud/user?format=json"
+        try:
+            reply = await self.send(
+                "GET",
+                url,
+                label="account",
+                op="read",
+                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+                max_body=1024 * 1024,
+                ok=(200,),
+            )
+        except NextcloudHTTPError as exc:
+            if exc.status == 401:
+                raise
+            raise ToolError(
+                f"Could not read the Nextcloud account ({exc.status}); check "
+                "NEXTCLOUD_MCP_BASE_URL points at the Nextcloud root."
+            ) from None
+        except BodyTooLarge:
+            raise ToolError("Nextcloud sent an unexpectedly large account answer.") from None
+        try:
+            data = json.loads(reply.body)
+            user_id = data["ocs"]["data"]["id"]
+        except (ValueError, KeyError, TypeError):
+            user_id = None
+        if not isinstance(user_id, str) or not user_id:
+            raise ToolError(
+                "The address in NEXTCLOUD_MCP_BASE_URL did not answer like a Nextcloud "
+                "server; check that it is the Nextcloud root URL."
+            )
+        return user_id
+
+    # -- URLs ----------------------------------------------------------------------
+
+    async def files_home(self) -> str:
+        user = quote(await self.user_id(), safe="")
+        return f"{self.settings.base_url}/remote.php/dav/files/{user}/"
+
+    async def calendars_home(self) -> str:
+        user = quote(await self.user_id(), safe="")
+        return f"{self.settings.base_url}/remote.php/dav/calendars/{user}/"
+
+    async def file_url(self, normalized: str) -> str:
+        return await self.files_home() + encode_path(normalized)
