@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "woow-nextcloud-mcp-server"
+version = "0.1.0"
+description = "A small MCP server that lets an MCP client work with one Nextcloud account (files, calendars, tasks) through an app password."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "WOOWTECH", email = "noreply@woowtech.io" }]
+requires-python = ">=3.11"
+keywords = ["mcp", "nextcloud", "webdav", "caldav", "fastmcp"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: File Sharing",
+]
+dependencies = [
+  "fastmcp==3.4.5",
+  "mcp==1.28.1",
+  "httpx==0.28.1",
+  "pydantic-settings==2.15.0",
+  "defusedxml==0.7.1",
+  "typing-extensions==4.16.0",
+  "tzdata==2026.5; sys_platform == 'win32'",
+]
+
+[project.scripts]
+nextcloud-mcp-server = "nextcloud_mcp_server.server:main"
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "pytest-cov==7.1.0",
+  "ruff==0.16.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nextcloud_mcp_server"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/nextcloud_mcp_server",
+  "tests",
+  "scripts",
+  "README.md",
+  "README.zh-TW.md",
+  "CHANGELOG.md",
+  "SPEC.md",
+  "PROVENANCE.md",
+  "THIRD_PARTY_NOTICES.md",
+  "LICENSE",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["nextcloud_mcp_server"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+exclude_also = ["if __name__ == .__main__.:"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests", "scripts"]
+extend-exclude = [".venv*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "ASYNC", "PT"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S311", "PT018"]
