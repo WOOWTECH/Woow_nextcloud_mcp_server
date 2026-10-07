@@ -89,7 +89,7 @@ async def test_user_id_is_cached_and_resolved_lazily(
 
 async def test_user_id_401(settings: Settings) -> None:
     nc = _client(settings, lambda r: httpx.Response(401, text="nope"))
-    with pytest.raises(ToolError, match=r"^Nextcloud rejected the username or app password\.$"):
+    with pytest.raises(ToolError, match=r"^Nextcloud rejected the username or app password\. Fix"):
         await nc.user_id()
 
 

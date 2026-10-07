@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 
 import pytest
 
-from nextcloud_mcp_server.client import NextcloudClient
+from nextcloud_mcp_server.client import NextcloudClient, reset_auth_latch
 from nextcloud_mcp_server.settings import Settings
 from nextcloud_mcp_server.tools import NextcloudTools
 
@@ -26,6 +26,14 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
             monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(tmp_path)
     monkeypatch.delitem(sys.modules, "backend_policy", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_auth_latch() -> Iterator[None]:
+    """The 401/429 latch is process-wide; every test starts (and ends) without it."""
+    reset_auth_latch()
+    yield
+    reset_auth_latch()
 
 
 @pytest.fixture

@@ -20,6 +20,19 @@ Operation = Literal[
 ]
 
 AUTH_MESSAGE = "Nextcloud rejected the username or app password."
+AUTH_LATCHED_MESSAGE = (
+    AUTH_MESSAGE + " Fix the credentials and restart the server; no further login attempts "
+    "will be made until then."
+)
+THROTTLED_MESSAGE = (
+    "Nextcloud is throttling requests from this server (too many failed logins); ask the "
+    "Nextcloud administrator to reset brute-force protection for this IP, then restart "
+    "the server."
+)
+
+
+class GatewayDenied(ToolError):
+    """The gateway's backend_policy refused the destination or path."""
 
 
 class NextcloudHTTPError(ToolError):
@@ -48,6 +61,8 @@ def status_message(
     """Translate a backend HTTP status into the message of the error table (SPEC §6)."""
     if status == 401:
         return AUTH_MESSAGE
+    if status == 429:
+        return THROTTLED_MESSAGE
     if status == 403:
         return f'Permission denied for "{label}".'
     if status == 404 and op in ("create", "upload_create"):

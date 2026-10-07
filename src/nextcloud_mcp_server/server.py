@@ -78,6 +78,8 @@ def create_server(
         on_duplicate="error",
     )
     register_tools(server, nc, settings)
+    # For gateways: ``await server.nextcloud_client.probe()`` is a cheap health check.
+    server.nextcloud_client = nc  # type: ignore[attr-defined]
     return server
 
 

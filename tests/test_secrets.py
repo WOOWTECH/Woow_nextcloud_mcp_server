@@ -77,7 +77,7 @@ async def test_no_secret_through_mcp(settings, fake: FakeNextcloud, caplog) -> N
     async with Client(create_server(settings, transport=fake.transport)) as client:
         result = await client.call_tool_mcp("read_text_file", {"path": "Docs/readme.md"})
     assert result.isError is True
-    assert result.content[0].text == "Nextcloud rejected the username or app password."
+    assert result.content[0].text.startswith("Nextcloud rejected the username or app password.")
     _assert_clean(str(result))
     _assert_clean(_records_text(caplog.records))
 

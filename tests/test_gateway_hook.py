@@ -10,6 +10,7 @@ from fastmcp.exceptions import ToolError
 
 from fake_nextcloud import FakeNextcloud
 from nextcloud_mcp_server.client import NextcloudClient, carried_status, failure_error
+from nextcloud_mcp_server.errors import AUTH_LATCHED_MESSAGE, THROTTLED_MESSAGE
 from nextcloud_mcp_server.tools import NextcloudTools
 from test_client import (
     BackendDenied,
@@ -101,7 +102,8 @@ async def test_read_missing(hooked: NextcloudTools) -> None:
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
-        (401, "Nextcloud rejected the username or app password."),
+        (401, AUTH_LATCHED_MESSAGE),
+        (429, THROTTLED_MESSAGE),
         (403, 'Permission denied for "Docs/readme.md".'),
         (500, "Nextcloud returned an error (500); try again later."),
         (507, 'Not enough storage or file too large for "Docs/readme.md".'),

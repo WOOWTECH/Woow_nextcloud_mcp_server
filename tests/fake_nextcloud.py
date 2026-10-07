@@ -184,6 +184,13 @@ class FakeNextcloud:
             parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
             if parent not in self.folders:
                 return httpx.Response(404)  # what Nextcloud 35 answers (not 409)
+            if (
+                exists_file
+                and "If-None-Match" not in request.headers
+                and "If-Match" not in request.headers
+            ):
+                # Strict server: overwriting needs a precondition (RFC 6585 428).
+                return httpx.Response(428)
             if request.headers.get("If-None-Match") == "*" and exists_file:
                 return httpx.Response(412)
             if_match = request.headers.get("If-Match")

@@ -18,7 +18,9 @@ from fastmcp.exceptions import ToolError
 
 from . import __version__
 from .errors import (
-    AUTH_MESSAGE,
+    AUTH_LATCHED_MESSAGE,
+    THROTTLED_MESSAGE,
+    GatewayDenied,
     NextcloudHTTPError,
     Operation,
     http_error_message,
@@ -97,7 +99,7 @@ def failure_error(exc: BaseException, label: str) -> ToolError:
     """ToolError for a failed exchange. Never includes text from the exception."""
     code = _gateway_code(exc)
     if code == "BACKEND_DESTINATION_DENIED":
-        return ToolError(
+        return GatewayDenied(
             f'The gateway refused this request for "{label}" (destination or path not allowed).'
         )
     if code == "BACKEND_BUSY":
@@ -109,6 +111,32 @@ def failure_error(exc: BaseException, label: str) -> ToolError:
     if isinstance(exc, _HTTPX_ERRORS):
         return ToolError(http_error_message(exc))
     return ToolError(f"Nextcloud returned an error ({type(exc).__name__}); try again later.")
+
+
+# Process-wide authentication latch (brute-force protection). After the first 401 or 429
+# from Nextcloud no further request is sent until the process restarts: every failed
+# Basic-auth login counts against the client IP and can get it throttled or banned.
+_auth_latch: NextcloudHTTPError | None = None
+
+
+def _latched() -> NextcloudHTTPError | None:
+    if _auth_latch is None:
+        return None
+    return NextcloudHTTPError(str(_auth_latch), _auth_latch.status)
+
+
+def _set_latch(status: int) -> NextcloudHTTPError:
+    global _auth_latch
+    message = AUTH_LATCHED_MESSAGE if status == 401 else THROTTLED_MESSAGE
+    _auth_latch = NextcloudHTTPError(message, status)
+    logger.warning("Nextcloud answered %s; no further requests will be sent until restart", status)
+    return NextcloudHTTPError(message, status)
+
+
+def reset_auth_latch() -> None:
+    """Clear the authentication latch (for tests; production clears it by restarting)."""
+    global _auth_latch
+    _auth_latch = None
 
 
 class BackendPolicyError(Exception):
@@ -253,8 +281,13 @@ class NextcloudClient:
         (also a ToolError) when the body exceeds ``max_body`` bytes (default
         :data:`MAX_XML_BYTES`).
         """
-        client = await self.http()
+        latched = _latched()
+        if latched is not None:
+            raise latched
         try:
+            # Building the client (a gateway hook may refuse the base URL) and the request
+            # fail through the same mapping as the exchange itself.
+            client = await self.http()
             request = client.build_request(method, url, headers=headers, content=content)
         except Exception as exc:
             raise failure_error(exc, label) from None
@@ -277,8 +310,8 @@ class NextcloudClient:
                     "set NEXTCLOUD_MCP_BASE_URL to the final address."
                 )
             if response.status_code not in ok:
-                if response.status_code == 401:
-                    raise NextcloudHTTPError(AUTH_MESSAGE, 401)
+                if response.status_code in (401, 429):
+                    raise _set_latch(response.status_code)
                 body = await self._read_capped(response, MAX_ERROR_BODY, tolerate=True)
                 detail = server_message(body) if response.status_code < 500 else None
                 raise NextcloudHTTPError(
@@ -328,6 +361,19 @@ class NextcloudClient:
                 self._user_id = await self._fetch_user_id()
         return self._user_id
 
+    async def probe(self) -> dict[str, Any]:
+        """Cheap health check for gateways (not an MCP tool).
+
+        Sends one authenticated OCS ``cloud/user`` request (no file or calendar data) and
+        returns ``{"ok": True, "user_id": <id>}``; on failure raises the same
+        :class:`ToolError` a tool would. It shares the user-id cache and the
+        authentication latch: after a 401/429 it fails without contacting Nextcloud.
+        """
+        user_id = await self._fetch_user_id()
+        if self._user_id is None:
+            self._user_id = user_id
+        return {"ok": True, "user_id": user_id}
+
     async def _fetch_user_id(self) -> str:
         url = f"{self.settings.base_url}/ocs/v2.php/cloud/user?format=json"
         try:
@@ -341,7 +387,7 @@ class NextcloudClient:
                 ok=(200,),
             )
         except NextcloudHTTPError as exc:
-            if exc.status == 401:
+            if exc.status in (401, 429):
                 raise
             raise ToolError(
                 f"Could not read the Nextcloud account ({exc.status}); check "

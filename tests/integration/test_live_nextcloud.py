@@ -316,4 +316,4 @@ async def test_wrong_password_is_reported() -> None:
     async with Client(create_server(settings)) as client:
         result = await client.call_tool_mcp("get_file_tree", {})
     assert result.isError is True
-    assert result.content[0].text == "Nextcloud rejected the username or app password."
+    assert result.content[0].text.startswith("Nextcloud rejected the username or app password.")
