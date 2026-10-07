@@ -176,6 +176,9 @@ loopback 時回應 `403`。WOOW 閘道在轉送前會把 `Host` 改寫成 `127.0
 （`User-Agent`）；傳輸層、TLS 驗證、`trust_env` 與 `follow_redirects` 由掛鉤自行設定
 （閘道用它來固定 DNS 並禁止重新導向）。無論如何，伺服器都會拒絕重新導向的回應。使用掛鉤時
 會忽略 `NEXTCLOUD_MCP_VERIFY_TLS` 與 `NEXTCLOUD_MCP_CA_BUNDLE`；若有設定，啟動時會記錄警告。
+閘道的傳輸層可能以例外取代錯誤回應：帶有整數 `status` 屬性的例外會被當成該 HTTP 狀態碼處理；
+閘道拒絕的請求（例如路徑含 `%`）會回報
+`The gateway refused this request for "<p>" (destination or path not allowed).`。
 掛鉤在啟動時就解析：沒有這個模組時使用一般的 `httpx.AsyncClient`；模組匯入失敗或沒有可呼叫的
 `async_client` 時，伺服器以狀態碼 2 停止，閘道的政策絕不會被默默略過。
 

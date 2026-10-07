@@ -10,6 +10,7 @@ Optional: NEXTCLOUD_MCP_IT_VERIFY_TLS=false for a LAN server with a private CA.
 from __future__ import annotations
 
 import base64
+import importlib.util
 import os
 import secrets
 from collections.abc import AsyncIterator
@@ -29,6 +30,9 @@ pytestmark = pytest.mark.skipif(
     not all(os.environ.get(f"NEXTCLOUD_MCP_IT_{name}") for name in IT_VARS),
     reason="set NEXTCLOUD_MCP_IT_BASE_URL/_USERNAME/_APP_PASSWORD to run integration tests",
 )
+
+# True when a gateway's backend_policy module is importable (e.g. via PYTHONPATH).
+GATEWAY = importlib.util.find_spec("backend_policy") is not None
 
 SPECIAL_NAMES = [
     "plain.md",
@@ -102,7 +106,20 @@ async def test_file_lifecycle_with_special_names() -> None:
     async with live() as nc:
         for name in SPECIAL_NAMES:
             path = f"{nc.folder}/{name}"
-            created = await nc.call("create_text_file", {"path": path, "content": "one\n"})
+            if GATEWAY and "%" in name:
+                # A gateway backend_policy may refuse paths containing '%'.
+                result = await nc.client.call_tool_mcp(
+                    "create_text_file", {"path": path, "content": "one\n"}
+                )
+                if result.isError:
+                    assert result.content[0].text == (
+                        f'The gateway refused this request for "{path}" '
+                        "(destination or path not allowed)."
+                    )
+                    continue
+                created = result.structuredContent
+            else:
+                created = await nc.call("create_text_file", {"path": path, "content": "one\n"})
             assert created["status"] == "created" and created["etag"]
             assert "already exists" in await nc.fails(
                 "create_text_file", {"path": path, "content": "again"}

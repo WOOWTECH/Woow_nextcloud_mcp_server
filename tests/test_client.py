@@ -210,19 +210,71 @@ async def test_error_body_is_capped_and_message_extracted(settings: Settings) ->
 # ----------------------------------------------------------------------- backend_policy hook
 
 
+class BackendHTTPError(httpx.HTTPError):
+    """Like the gateway's: non-2xx answers are raised, carrying only ``status``."""
+
+    def __init__(self, status: int) -> None:
+        self.status = int(status)
+        super().__init__(f"BACKEND_HTTP_ERROR status={self.status}")
+
+
+class BackendDenied(ValueError):
+    def __init__(self) -> None:
+        super().__init__("BACKEND_DESTINATION_DENIED")
+
+
+class BackendBusy(httpx.HTTPError):
+    def __init__(self) -> None:
+        super().__init__("BACKEND_BUSY")
+
+
+class BackendFailure(httpx.HTTPError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class GatewayTransport(httpx.AsyncBaseTransport):
+    """Mirror of a gateway transport around an inner (fake) transport.
+
+    Refuses paths containing an encoded '%' (or '.'/'..' segments) with BackendDenied
+    and turns every non-2xx answer into BackendHTTPError (headers and body are lost).
+    """
+
+    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+        self.inner = inner
+        self.busy = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        from urllib.parse import unquote
+
+        path = unquote(request.url.path)
+        if "%" in path or any(part in (".", "..") for part in path.split("/")):
+            raise BackendDenied()
+        if self.busy:
+            raise BackendBusy()
+        response = await self.inner.handle_async_request(request)
+        if not 200 <= response.status_code < 300:
+            await response.aclose()
+            raise BackendHTTPError(response.status_code)
+        return response
+
+
 def realistic_policy(transport: httpx.AsyncBaseTransport, calls: list[dict]):
     """Mirror of a gateway hook: it owns transport, trust_env and follow_redirects.
 
     Passing any of those again makes ``httpx.AsyncClient`` raise ``TypeError: got
     multiple values for keyword argument`` - exactly what a real gateway hook does.
+    The transport behaves like the gateway's (see :class:`GatewayTransport`).
     """
+    gateway = transport if isinstance(transport, GatewayTransport) else GatewayTransport(transport)
 
     def async_client(*, base_url: str, **kwargs):
         calls.append({"base_url": base_url, **kwargs})
         kwargs.pop("limits", None)
         return httpx.AsyncClient(
             base_url=base_url,
-            transport=transport,
+            transport=gateway,
             trust_env=False,
             follow_redirects=False,
             **kwargs,

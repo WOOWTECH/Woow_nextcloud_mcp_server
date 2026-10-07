@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -53,6 +54,61 @@ class BodyTooLarge(ToolError):
             f"Nextcloud's answer{target} is larger than {limit} bytes and was not processed."
         )
         self.limit = limit
+
+
+_STATUS_CODE = re.compile(r"^BACKEND_HTTP_ERROR status=(\d{3})$")
+
+
+def carried_status(exc: BaseException) -> int | None:
+    """HTTP status carried by an exception (gateway transports raise for non-2xx).
+
+    Duck-typed: an int ``status`` attribute, or a ``code`` string of the form
+    ``BACKEND_HTTP_ERROR status=NNN`` on a wrapped failure.
+    """
+    status = getattr(exc, "status", None)
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        return status
+    code = getattr(exc, "code", None)
+    if isinstance(code, str):
+        match = _STATUS_CODE.match(code)
+        if match:
+            return int(match[1])
+    return None
+
+
+def _gateway_code(exc: BaseException) -> str | None:
+    name = type(exc).__name__
+    if name == "BackendDenied":
+        return "BACKEND_DESTINATION_DENIED"
+    if name == "BackendBusy":
+        return "BACKEND_BUSY"
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.startswith("BACKEND_"):
+        return code
+    if isinstance(exc, (ValueError, httpx.HTTPError)) and str(exc) in (
+        "BACKEND_DESTINATION_DENIED",
+        "BACKEND_BUSY",
+    ):
+        return str(exc)
+    return None
+
+
+def failure_error(exc: BaseException, label: str) -> ToolError:
+    """ToolError for a failed exchange. Never includes text from the exception."""
+    code = _gateway_code(exc)
+    if code == "BACKEND_DESTINATION_DENIED":
+        return ToolError(
+            f'The gateway refused this request for "{label}" (destination or path not allowed).'
+        )
+    if code == "BACKEND_BUSY":
+        return ToolError("Nextcloud is busy; try again later.")
+    if code == "BACKEND_TIMEOUT":
+        return ToolError("Could not reach Nextcloud (timed out).")
+    if code == "BACKEND_UNAVAILABLE":
+        return ToolError("Could not reach Nextcloud (connection failed).")
+    if isinstance(exc, _HTTPX_ERRORS):
+        return ToolError(http_error_message(exc))
+    return ToolError(f"Nextcloud returned an error ({type(exc).__name__}); try again later.")
 
 
 class BackendPolicyError(Exception):
@@ -200,10 +256,18 @@ class NextcloudClient:
         client = await self.http()
         try:
             request = client.build_request(method, url, headers=headers, content=content)
+        except Exception as exc:
+            raise failure_error(exc, label) from None
+        try:
             response = await client.send(request, stream=True)
-        except _HTTPX_ERRORS as exc:
-            logger.warning("%s request failed: %s", method, type(exc).__name__)
-            raise ToolError(http_error_message(exc)) from None
+        except Exception as exc:
+            status = carried_status(exc)
+            if status is None:
+                logger.warning("%s request failed: %s", method, type(exc).__name__)
+                raise failure_error(exc, label) from None
+            # A gateway transport (backend_policy) raises instead of returning non-2xx
+            # answers; treat it exactly like that answer without headers or body.
+            response = httpx.Response(status, request=request)
         try:
             logger.debug("%s -> %s", method, response.status_code)
             if 300 <= response.status_code < 400:
@@ -227,9 +291,11 @@ class NextcloudClient:
             except BodyTooLarge:
                 raise BodyTooLarge(limit, label) from None
             return Reply(status=response.status_code, headers=response.headers, body=body)
-        except _HTTPX_ERRORS as exc:
+        except ToolError:
+            raise
+        except Exception as exc:
             logger.warning("%s response failed: %s", method, type(exc).__name__)
-            raise ToolError(http_error_message(exc)) from None
+            raise failure_error(exc, label) from None
         finally:
             await response.aclose()
 

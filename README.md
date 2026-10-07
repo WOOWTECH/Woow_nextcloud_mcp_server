@@ -187,7 +187,11 @@ only `base_url`, `auth` (HTTP Basic), `timeout` and `headers` (the `User-Agent`)
 owns the transport, TLS verification, `trust_env` and `follow_redirects` and must set them
 itself (gateways use it to pin DNS and forbid redirects). Redirect answers are refused by
 the server in any case. Under the hook `NEXTCLOUD_MCP_VERIFY_TLS` and
-`NEXTCLOUD_MCP_CA_BUNDLE` are ignored; a warning is logged at start-up if they are set. The hook is resolved at start-up: without the module a plain
+`NEXTCLOUD_MCP_CA_BUNDLE` are ignored; a warning is logged at start-up if they are set. A
+gateway transport may raise instead of returning error answers: an exception carrying an
+integer `status` is handled like that HTTP status, and a gateway refusal (for example of
+a path containing `%`) is reported as `The gateway refused this request for "<p>"
+(destination or path not allowed).` The hook is resolved at start-up: without the module a plain
 `httpx.AsyncClient` is used; a module that fails to import or has no callable
 `async_client` stops the server with exit status 2, so a gateway's policy can never be
 skipped silently.

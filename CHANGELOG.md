@@ -15,6 +15,16 @@ All notable changes to this project are documented here. The format follows
   TLS verification, `trust_env` and `follow_redirects`.
 - `NEXTCLOUD_MCP_VERIFY_TLS` / `NEXTCLOUD_MCP_CA_BUNDLE` are documented as ignored under
   the hook, and a start-up warning is logged when they are set while the hook is active.
+- Gateway transports raise instead of returning non-2xx answers. An exception with an
+  integer `status` (or a `code` of the form `BACKEND_HTTP_ERROR status=N`) is now treated
+  exactly like an answer with that status and no headers or body, so the full error table
+  applies again (412 "already exists"/"changed since it was read" with the follow-up
+  PROPFIND, 404 parent folder on create, 423 locked, 3xx redirect). Before, every such
+  failure read "Nextcloud returned an error (BackendHTTPError)".
+- A gateway denial (`BackendDenied` / `BACKEND_DESTINATION_DENIED`, e.g. for paths
+  containing `%`) reads `The gateway refused this request for "<p>" (destination or path
+  not allowed).`; `BACKEND_BUSY` reads `Nextcloud is busy; try again later.` Gateway
+  exception text is never included in messages.
 
 ## 0.1.0 - 2026-10-07
 
