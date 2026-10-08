@@ -2,8 +2,11 @@
 
 Skipped unless NEXTCLOUD_MCP_IT_BASE_URL, NEXTCLOUD_MCP_IT_USERNAME and
 NEXTCLOUD_MCP_IT_APP_PASSWORD are set. Use a dedicated test account. The tests only
-touch a folder ``woow-mcp-it-<random>`` and a calendar ``woow-mcp-it-<random>`` that
-they create themselves and delete again at the end (deleted items go to the trash bin).
+touch a folder ``woow-mcp-it-<random>`` that they create and delete again (deleted items
+go to the trash bin), and a calendar ``woow-mcp-it`` that is created once per account
+and reused: Nextcloud rate-limits calendar creation (about 10 per user and hour by
+default), so each run only adds and removes its own ``woow-mcp-it-<random>-*`` objects.
+If the calendar does not exist yet and creating it is rate-limited, that test is skipped.
 Optional: NEXTCLOUD_MCP_IT_VERIFY_TLS=false for a LAN server with a private CA.
 """
 
@@ -247,84 +250,147 @@ async def test_tree_and_folder_refusals() -> None:
         )
 
 
+# One calendar per test account is reused across runs: Nextcloud rate-limits calendar
+# creation per user (app config ``dav`` ``rateLimitCalendarCreation`` /
+# ``rateLimitPeriodCalendarCreation``, by default about 10 per hour), so creating a new
+# calendar on every run soon answers 429. Each run adds its own uniquely named objects
+# and deletes exactly those; the calendar itself is never deleted.
+IT_CALENDAR = "woow-mcp-it"
+
 MKCALENDAR = """<?xml version="1.0" encoding="utf-8"?>
 <c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
  <d:set><d:prop>
   <d:displayname>{name}</d:displayname>
-  <c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set>
+  <c:supported-calendar-component-set>
+   <c:comp name="VTODO"/><c:comp name="VEVENT"/>
+  </c:supported-calendar-component-set>
  </d:prop></d:set>
 </c:mkcalendar>"""
 
+PROPFIND_COMPONENTS = (
+    b'<?xml version="1.0" encoding="utf-8"?>'
+    b'<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+    b"<d:prop><c:supported-calendar-component-set/></d:prop></d:propfind>"
+)
 
-def _todo(uid: str, *lines: str) -> str:
-    body = "\r\n".join(
+
+def _ics(component: str, uid: str, *lines: str) -> str:
+    return "\r\n".join(
         [
             "BEGIN:VCALENDAR",
             "VERSION:2.0",
             "PRODID:-//WOOW//integration tests//EN",
-            "BEGIN:VTODO",
+            f"BEGIN:{component}",
             f"UID:{uid}",
             "DTSTAMP:20261007T000000Z",
             *lines,
-            "END:VTODO",
+            f"END:{component}",
             "END:VCALENDAR",
             "",
         ]
     )
-    return body
+
+
+def _todo(uid: str, *lines: str) -> str:
+    return _ics("VTODO", uid, *lines)
+
+
+async def _shared_calendar(nc: Live) -> tuple[str, bool]:
+    """URL of the reused test calendar (created once) and whether it accepts VEVENT."""
+    cal_url = f"{nc.calendars_home}{IT_CALENDAR}/"
+    found = await nc.http.request(
+        "PROPFIND",
+        cal_url,
+        content=PROPFIND_COMPONENTS,
+        headers={"Depth": "0", "Content-Type": "application/xml; charset=utf-8"},
+    )
+    if found.status_code == 404:
+        made = await nc.http.request(
+            "MKCALENDAR",
+            cal_url,
+            content=MKCALENDAR.format(name=IT_CALENDAR).encode(),
+            headers={"Content-Type": "application/xml; charset=utf-8"},
+        )
+        if made.status_code == 429:
+            pytest.skip(
+                "Nextcloud rate-limits calendar creation for this account (dav "
+                "rateLimitCalendarCreation); create the calendar 'woow-mcp-it' once or "
+                "try again later"
+            )
+        assert made.status_code == 201, made.status_code
+        return cal_url, True
+    assert found.status_code == 207, found.status_code
+    return cal_url, b'name="VEVENT"' in found.content or b"name='VEVENT'" in found.content
 
 
 async def test_calendars_and_tasks() -> None:
     async with live() as nc:
-        cal_id = nc.folder
-        cal_url = f"{nc.calendars_home}{cal_id}/"
-        made = await nc.http.request(
-            "MKCALENDAR",
-            cal_url,
-            content=MKCALENDAR.format(name=cal_id).encode(),
-            headers={"Content-Type": "application/xml; charset=utf-8"},
-        )
-        assert made.status_code == 201, made.status_code
+        cal_id = IT_CALENDAR
+        cal_url, events_allowed = await _shared_calendar(nc)
+        run = nc.folder  # woow-mcp-it-<random>: unique per run
+        uid = {name: f"{run}-{name}" for name in ("open-later", "open-soon", "done", "no-due")}
+        objects = {
+            uid["open-later"]: _todo(uid["open-later"], "SUMMARY:Later", "DUE;VALUE=DATE:20991231"),
+            uid["open-soon"]: _todo(uid["open-soon"], "SUMMARY:Soon", "DUE:20990101T080000Z"),
+            uid["done"]: _todo(
+                uid["done"], "SUMMARY:Done", "STATUS:COMPLETED", "COMPLETED:20261001T000000Z"
+            ),
+            uid["no-due"]: _todo(
+                uid["no-due"], "SUMMARY:Whenever 中文", "DESCRIPTION:" + "x" * 800
+            ),
+        }
+        if events_allowed:
+            objects[f"{run}-event"] = _ics(
+                "VEVENT", f"{run}-event", "SUMMARY:Not a task", "DTSTART:20991231T090000Z"
+            )
+        created: list[str] = []
         try:
-            todos = {
-                "open-later": _todo("open-later", "SUMMARY:Later", "DUE;VALUE=DATE:20991231"),
-                "open-soon": _todo("open-soon", "SUMMARY:Soon", "DUE:20990101T080000Z"),
-                "done": _todo(
-                    "done", "SUMMARY:Done", "STATUS:COMPLETED", "COMPLETED:20261001T000000Z"
-                ),
-                "no-due": _todo("no-due", "SUMMARY:Whenever 中文", "DESCRIPTION:" + "x" * 800),
-            }
-            for uid, ics in todos.items():
+            for name, ics in objects.items():
                 put = await nc.http.put(
-                    f"{cal_url}{uid}.ics",
+                    f"{cal_url}{name}.ics",
                     content=ics.encode(),
-                    headers={"Content-Type": "text/calendar; charset=utf-8"},
+                    headers={
+                        "Content-Type": "text/calendar; charset=utf-8",
+                        "If-None-Match": "*",
+                    },
                 )
                 assert put.status_code in (201, 204), put.status_code
+                created.append(name)
 
             calendars = (await nc.call("list_calendars", {}))["calendars"]
             mine = [c for c in calendars if c["id"] == cal_id]
             assert mine and "VTODO" in mine[0]["components"] and mine[0]["writable"] is True
 
-            tasks = (await nc.call("list_tasks", {"calendar": cal_id}))["tasks"]
-            assert [t["uid"] for t in tasks] == ["open-soon", "open-later", "no-due"]
-            assert tasks[1]["due"] == "2099-12-31"
-            assert tasks[0]["due"] == "2099-01-01T08:00:00Z"
-            assert len(tasks[2]["description"]) == 500
+            # The calendar may hold objects of other (earlier, crashed) runs: look at ours.
+            tasks = (await nc.call("list_tasks", {"calendar": cal_id, "limit": 500}))["tasks"]
+            ours = [t for t in tasks if (t["uid"] or "").startswith(f"{run}-")]
+            assert [t["uid"] for t in ours] == [uid["open-soon"], uid["open-later"], uid["no-due"]]
+            assert ours[1]["due"] == "2099-12-31"
+            assert ours[0]["due"] == "2099-01-01T08:00:00Z"
+            assert len(ours[2]["description"]) == 500
+            assert f"{run}-event" not in {t["uid"] for t in tasks}  # events are not tasks
 
             everything = await nc.call(
                 "list_tasks", {"calendar": cal_id, "include_completed": True, "limit": 3}
             )
             assert everything["truncated"] is True
             assert len(everything["tasks"]) == 3
+            completed = await nc.call(
+                "list_tasks", {"calendar": cal_id, "include_completed": True, "limit": 500}
+            )
+            assert uid["done"] in {t["uid"] for t in completed["tasks"]}
 
             all_calendars = (await nc.call("list_tasks", {"limit": 500}))["tasks"]
-            assert {"open-soon", "open-later", "no-due"} <= {t["uid"] for t in all_calendars}
+            assert {uid["open-soon"], uid["open-later"], uid["no-due"]} <= {
+                t["uid"] for t in all_calendars
+            }
             assert "Unknown calendar" in await nc.fails(
                 "list_tasks", {"calendar": cal_id + "-missing"}
             )
         finally:
-            await nc.http.request("DELETE", cal_url)
+            # Delete exactly the objects this run created; never the calendar.
+            for name in created:
+                await nc.http.request("DELETE", f"{cal_url}{name}.ics")
 
 
 async def test_read_only_server_has_no_write_tools() -> None:

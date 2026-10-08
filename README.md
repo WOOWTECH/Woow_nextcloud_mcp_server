@@ -281,7 +281,11 @@ uv run python scripts/check_licenses.py   # runtime licence check (queries PyPI 
 
 Unit tests use `httpx.MockTransport` and never touch the network. Integration tests in
 `tests/integration` run against a real Nextcloud only when these are set (use a test
-account; they create and remove a folder and a calendar named `woow-mcp-it-<random>`):
+account). They create and remove a folder `woow-mcp-it-<random>`. For calendars they reuse
+one calendar `woow-mcp-it`, created once per account, because Nextcloud rate-limits
+calendar creation (about 10 per user and hour by default, `dav`
+`rateLimitCalendarCreation`); each run adds and deletes only its own objects, and the
+calendar test is skipped if creating the calendar is rate-limited:
 
 ```sh
 export NEXTCLOUD_MCP_IT_BASE_URL=https://cloud.example.com

@@ -17,6 +17,14 @@ All notable changes to this project are documented here. The format follows
 - A 429 latch expires after `Retry-After` (seconds or HTTP date, capped at 15 minutes),
   or after 5 minutes when the server sent none. A 401 latch still lasts until restart.
 
+### Tests
+
+- The calendar integration test reuses one calendar `woow-mcp-it` per account (created
+  only when missing) and adds/deletes only its own uniquely named VTODO/VEVENT objects:
+  Nextcloud rate-limits calendar creation per user (about 10 per hour by default), which
+  made repeated runs fail with 429. If creating the calendar is rate-limited the test is
+  skipped with that reason.
+
 ## 0.1.2 - 2026-10-08
 
 ### Added

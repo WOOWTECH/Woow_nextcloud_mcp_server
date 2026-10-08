@@ -251,8 +251,11 @@ uv run python scripts/check_licenses.py   # 執行期授權檢查（其他平台
 ```
 
 單元測試使用 `httpx.MockTransport`，完全不連網路。`tests/integration` 中的整合測試只在
-設定下列變數時才會對真正的 Nextcloud 執行（請使用測試帳號；測試會建立並移除名為
-`woow-mcp-it-<亂數>` 的資料夾與行事曆）：
+設定下列變數時才會對真正的 Nextcloud 執行（請使用測試帳號）。測試會建立並移除名為
+`woow-mcp-it-<亂數>` 的資料夾。行事曆則重複使用每個帳號只建立一次的 `woow-mcp-it`，因為
+Nextcloud 會限制建立行事曆的頻率（預設每位使用者每小時約 10 個，`dav`
+`rateLimitCalendarCreation`）；每次執行只新增並刪除自己的物件，若建立行事曆被限速，該項
+測試會被略過：
 
 ```sh
 export NEXTCLOUD_MCP_IT_BASE_URL=https://cloud.example.com
