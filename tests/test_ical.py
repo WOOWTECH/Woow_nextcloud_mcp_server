@@ -141,3 +141,63 @@ def test_unfold_is_linear() -> None:
     lines = unfold(text)
     assert time.perf_counter() - started < 2
     assert lines == ["DESCRIPTION:" + "x" * 700_000, "UID:1"]
+
+
+def test_deep_nesting_is_linear_and_capped() -> None:
+    from nextcloud_mcp_server.caldav import tasks_from_report
+    from nextcloud_mcp_server.ical import MAX_NESTING, ObjectTooDeep
+
+    depth = 40_000
+    names = [f"X-C{i}" for i in range(depth)]
+    text = (
+        "BEGIN:VCALENDAR\r\n"
+        + "".join(f"BEGIN:{n}\r\n" for n in names)
+        + "".join(f"END:{n}\r\n" for n in reversed(names))
+        + "END:VCALENDAR\r\n"
+    )
+    assert 0.5 * 1024 * 1024 < len(text) < 1.5 * 1024 * 1024
+    started = time.perf_counter()
+    with pytest.raises(ObjectTooDeep):
+        components(text, "VTODO")
+    assert time.perf_counter() - started < 1
+
+    # within the cap: unmatched ENDs of names that are not open stay O(1)
+    shallow = (
+        "BEGIN:VCALENDAR\r\n"
+        + "END:NOT-OPEN\r\n" * 50_000
+        + "BEGIN:VTODO\r\nUID:u\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+    started = time.perf_counter()
+    assert [c["UID"].value for c in components(shallow, "VTODO")] == ["u"]
+    assert time.perf_counter() - started < 1
+
+    from xml.sax.saxutils import escape
+
+    nested = "BEGIN:VCALENDAR\r\n" + "BEGIN:X\r\n" * MAX_NESTING + "END:VCALENDAR\r\n"
+    body = (
+        '<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+        "<d:response><d:href>/a.ics</d:href><d:propstat><d:prop><c:calendar-data>"
+        f"{escape(nested)}</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status>"
+        "</d:propstat></d:response>"
+        "<d:response><d:href>/b.ics</d:href><d:propstat><d:prop><c:calendar-data>"
+        "BEGIN:VCALENDAR&#13;\nBEGIN:VTODO&#13;\nUID:ok&#13;\nEND:VTODO&#13;\nEND:VCALENDAR"
+        "</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status>"
+        "</d:propstat></d:response></d:multistatus>"
+    ).encode()
+    tasks, skipped = tasks_from_report("c", body)
+    assert [t["uid"] for t in tasks] == ["ok"]
+    assert skipped == 1
+
+
+def test_nesting_up_to_the_cap_is_read() -> None:
+    from nextcloud_mcp_server.ical import MAX_NESTING
+
+    inner = MAX_NESTING - 2  # VCALENDAR + VTODO + wrappers
+    text = (
+        "BEGIN:VCALENDAR\r\n"
+        + "BEGIN:X-W\r\n" * inner
+        + "BEGIN:VTODO\r\nUID:deep\r\nEND:VTODO\r\n"
+        + "END:X-W\r\n" * inner
+        + "END:VCALENDAR\r\n"
+    )
+    assert [c["UID"].value for c in components(text, "VTODO")] == ["deep"]

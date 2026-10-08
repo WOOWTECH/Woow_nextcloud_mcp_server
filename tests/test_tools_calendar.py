@@ -208,3 +208,31 @@ async def test_override_only_objects_are_skipped(
     cal.objects["r.ics"] = vtodo("r", "Series", "RRULE:FREQ=DAILY", "DUE:20261001T090000Z")
     result = await tools.list_tasks()
     assert [(t["uid"], t["due"]) for t in result["tasks"]] == [("r", "2026-10-01T09:00:00Z")]
+
+
+async def test_list_tasks_skips_gateway_refused_calendars(settings, fake: FakeNextcloud) -> None:
+    from nextcloud_mcp_server.client import NextcloudClient
+    from test_client import GatewayTransport, realistic_policy
+
+    ok = fake.add_calendar("chores", "Chores", ["VTODO"])
+    ok.objects["d.ics"] = vtodo("d", "Dishes")
+    odd = fake.add_calendar("50% off", "Sale", ["VTODO"])
+    odd.objects["s.ics"] = vtodo("s", "Hidden")
+    nc = NextcloudClient(settings, policy=realistic_policy(GatewayTransport(fake.transport), []))
+    tools = NextcloudTools(nc, settings)
+    result = await tools.list_tasks()
+    assert [t["uid"] for t in result["tasks"]] == ["d"]
+    assert result["skipped_calendars"] == 1
+    with pytest.raises(ToolError, match="The gateway refused this request"):
+        await tools.list_tasks(calendar="50% off")
+    await nc.aclose()
+
+
+async def test_skipped_calendars_counts_403_and_is_absent_otherwise(
+    tools: NextcloudTools, calendars: FakeNextcloud
+) -> None:
+    assert "skipped_calendars" not in await tools.list_tasks()
+    calendars.override = lambda r: (
+        httpx.Response(403) if r.method == "REPORT" and b"chores" in r.url.raw_path else None
+    )
+    assert (await tools.list_tasks())["skipped_calendars"] == 1

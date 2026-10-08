@@ -138,6 +138,7 @@ async def test_file_lifecycle_with_special_names() -> None:
                 )
                 if result.isError:
                     assert result.content[0].text == (
+                        "BACKEND_DESTINATION_DENIED: "  # code mode is on under the hook
                         f'The gateway refused this request for "{path}" '
                         "(destination or path not allowed)."
                     )
@@ -410,4 +411,7 @@ async def test_wrong_password_is_reported() -> None:
     async with Client(create_server(settings)) as client:
         result = await client.call_tool_mcp("get_file_tree", {})
     assert result.isError is True
-    assert result.content[0].text.startswith("Nextcloud rejected the username or app password.")
+    expected = "Nextcloud rejected the username or app password."
+    if GATEWAY:  # code mode is on automatically under the gateway hook
+        expected = "BACKEND_HTTP_ERROR status=401: " + expected
+    assert result.content[0].text.startswith(expected)

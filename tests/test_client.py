@@ -437,3 +437,44 @@ def test_ca_bundle_builds_ssl_context(make_settings, tmp_path) -> None:
     assert isinstance(nc.client_kwargs()["verify"], ssl.SSLContext)
     insecure = NextcloudClient(make_settings(ca_bundle=str(bundle), verify_tls=False))
     assert insecure.client_kwargs()["verify"] is False
+
+
+async def test_close_failure_keeps_the_original_error(settings: Settings) -> None:
+    """Closing an unread response (in send's finally) must not replace the error."""
+
+    class BadClose(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"never read"
+
+        async def aclose(self) -> None:
+            raise RuntimeError("close failed")
+
+    redirect = _client(
+        settings,
+        lambda r: httpx.Response(302, headers={"Location": "/elsewhere"}, stream=BadClose()),
+    )
+    with pytest.raises(ToolError, match="answered with a redirect"):
+        await redirect.send("GET", BASE_URL + "/x", label="x", op="read")
+
+    too_large = _client(
+        settings,
+        lambda r: httpx.Response(200, headers={"Content-Length": "100"}, stream=BadClose()),
+    )
+    with pytest.raises(BodyTooLarge):
+        await too_large.send("GET", BASE_URL + "/x", label="x", op="read", max_body=10)
+
+
+async def test_close_failure_after_success_keeps_the_result(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nc = _client(settings, lambda r: httpx.Response(200, content=b"body"))
+    calls: list[int] = []
+
+    async def aclose(self) -> None:
+        calls.append(1)  # the body was already read; only send's own close remains
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(httpx.Response, "aclose", aclose)
+    reply = await nc.send("GET", BASE_URL + "/x", label="x", op="read")
+    assert reply.body == b"body"
+    assert calls == [1]

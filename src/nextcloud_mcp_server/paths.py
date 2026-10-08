@@ -107,6 +107,13 @@ def caller_etag(etag: str | None, argument: str = "expected_etag") -> str:
     return value
 
 
+def display_etag(etag: str | None) -> str | None:
+    """A server etag that may be shown in a message (RFC 9110 etagc ASCII, <= 256 chars)."""
+    if not etag or len(etag) > 256 or not all(_is_etag_char(ch) for ch in etag):
+        return None
+    return etag
+
+
 def quote_etag(etag: str) -> str:
     """Format an ETag for ``If-Match``."""
     return f'"{etag}"'

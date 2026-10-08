@@ -50,6 +50,8 @@ class FakeNextcloud:
         self.bodies: list[bytes] = []
         self.override: Override | None = None
         self.send_put_etag = True
+        # Mimic Nextcloud's ~1 s ETag resolution: a replace may keep the old ETag.
+        self.keep_etag_on_put = False
         self._etags = itertools.count(1)
         self.user_requests = 0
 
@@ -199,7 +201,10 @@ class FakeNextcloud:
             ):
                 return httpx.Response(412)
             ctype = request.headers.get("Content-Type", "application/octet-stream")
-            item = FakeFile(data=body, etag=self.new_etag(), content_type=ctype.split(";")[0])
+            etag = self.files[rel].etag if exists_file and self.keep_etag_on_put else None
+            item = FakeFile(
+                data=body, etag=etag or self.new_etag(), content_type=ctype.split(";")[0]
+            )
             self.files[rel] = item
             headers = {"ETag": f'"{item.etag}"', "OC-ETag": f'"{item.etag}"'}
             if not self.send_put_etag:

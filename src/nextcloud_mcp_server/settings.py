@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     verify_tls: bool = True
     ca_bundle: str | None = None
     allowed_hosts: str = ""
+    error_codes: str = "auto"
 
     @field_validator("base_url")
     @classmethod
@@ -85,6 +86,16 @@ class Settings(BaseSettings):
         if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
             raise ValueError("must not contain control characters")
         return value
+
+    @field_validator("error_codes")
+    @classmethod
+    def _check_error_codes(cls, value: str) -> str:
+        aliases = {"1": "true", "yes": "true", "on": "true", "0": "false", "no": "false"}
+        normalized = value.strip().lower()
+        normalized = aliases.get(normalized, "false" if normalized == "off" else normalized)
+        if normalized not in ("auto", "true", "false"):
+            raise ValueError("must be auto, true or false")
+        return normalized
 
     @field_validator("disabled_tools")
     @classmethod

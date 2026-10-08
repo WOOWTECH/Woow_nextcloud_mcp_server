@@ -9,6 +9,7 @@ import inspect
 import json
 import logging
 import re
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,12 +24,23 @@ from fastmcp.exceptions import ToolError
 from . import __version__
 from .errors import (
     AUTH_LATCHED_MESSAGE,
+    BUSY,
+    DESTINATION_DENIED,
+    INVALID_RESPONSE,
     THROTTLED_MESSAGE,
+    TIMEOUT,
+    UNAVAILABLE,
     GatewayDenied,
     NextcloudHTTPError,
     Operation,
+    coded,
+    failure_code,
+    http_code,
     http_error_message,
+    is_public_code,
+    render_error,
     status_message,
+    with_code,
 )
 from .paths import encode_path
 from .settings import Settings
@@ -60,6 +72,7 @@ class BodyTooLarge(ToolError):
             f"Nextcloud's answer{target} is larger than {limit} bytes and was not processed."
         )
         self.limit = limit
+        self.code = INVALID_RESPONSE
 
 
 _STATUS_CODE = re.compile(r"^BACKEND_HTTP_ERROR status=(\d{3})$")
@@ -100,21 +113,28 @@ def _gateway_code(exc: BaseException) -> str | None:
 
 
 def failure_error(exc: BaseException, label: str) -> ToolError:
-    """ToolError for a failed exchange. Never includes text from the exception."""
+    """ToolError for a failed exchange. Never includes text from the exception.
+
+    The error carries a public code (shown in code mode): the gateway's own code when the
+    exception names one, else BACKEND_TIMEOUT / BACKEND_UNAVAILABLE /
+    BACKEND_INVALID_RESPONSE.
+    """
     code = _gateway_code(exc)
-    if code == "BACKEND_DESTINATION_DENIED":
+    if code == DESTINATION_DENIED:
         return GatewayDenied(
             f'The gateway refused this request for "{label}" (destination or path not allowed).'
         )
-    if code == "BACKEND_BUSY":
-        return ToolError("Nextcloud is busy; try again later.")
-    if code == "BACKEND_TIMEOUT":
-        return ToolError("Could not reach Nextcloud (timed out).")
-    if code == "BACKEND_UNAVAILABLE":
-        return ToolError("Could not reach Nextcloud (connection failed).")
+    if code == BUSY:
+        return coded("Nextcloud is busy; try again later.", BUSY)
+    if code == TIMEOUT:
+        return coded("Could not reach Nextcloud (timed out).", TIMEOUT)
+    if code == UNAVAILABLE:
+        return coded("Could not reach Nextcloud (connection failed).", UNAVAILABLE)
     if isinstance(exc, _HTTPX_ERRORS):
-        return ToolError(http_error_message(exc))
-    return ToolError(f"Nextcloud returned an error ({type(exc).__name__}); try again later.")
+        error = ToolError(http_error_message(exc))
+    else:
+        error = ToolError(f"Nextcloud returned an error ({type(exc).__name__}); try again later.")
+    return with_code(error, code if is_public_code(code) else failure_code(exc))
 
 
 # Authentication latch (brute-force protection). After a 401 or 429 from Nextcloud no
@@ -266,11 +286,26 @@ class NextcloudClient:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         policy: PolicyFactory | None = _UNSET,
+        public_error: Callable[[BaseException], object] | None = None,
     ) -> None:
-        """``policy`` defaults to :func:`load_backend_policy`, resolved here (at start-up)."""
+        """``policy`` defaults to :func:`load_backend_policy`, resolved here (at start-up).
+
+        ``public_error`` maps a hook exception to a public code; by default the hook
+        module's ``public_backend_error`` is used when it has one.
+        """
         self.settings = settings
         self._transport = transport
-        self.policy: PolicyFactory | None = load_backend_policy() if policy is _UNSET else policy
+        if policy is _UNSET:
+            self.policy: PolicyFactory | None = load_backend_policy()
+            module = sys.modules.get("backend_policy") if self.policy is not None else None
+            hook_errors = getattr(module, "public_backend_error", None)
+            if public_error is None and callable(hook_errors):
+                public_error = hook_errors
+        else:
+            self.policy = policy
+        self.public_error = public_error
+        mode = settings.error_codes
+        self.code_mode = mode == "true" or (mode == "auto" and self.policy is not None)
         self._verify = settings.tls_verify()
         self.latch_key = latch_key(settings)
         self._client: httpx.AsyncClient | None = None
@@ -354,14 +389,14 @@ class NextcloudClient:
             client = await self.http()
             request = client.build_request(method, url, headers=headers, content=content)
         except Exception as exc:
-            raise failure_error(exc, label) from None
+            raise self._failure(exc, label) from None
         try:
             response = await client.send(request, stream=True)
         except Exception as exc:
             status = carried_status(exc)
             if status is None:
                 logger.warning("%s request failed: %s", method, type(exc).__name__)
-                raise failure_error(exc, label) from None
+                raise self._failure(exc, label) from None
             # A gateway transport (backend_policy) raises instead of returning non-2xx
             # answers; treat it exactly like that answer without headers or body.
             response = httpx.Response(status, request=request)
@@ -369,9 +404,10 @@ class NextcloudClient:
             logger.debug("%s -> %s", method, response.status_code)
             if 300 <= response.status_code < 400:
                 target = _redirect_target(str(request.url), response.headers.get("location"))
-                raise ToolError(
+                raise coded(
                     f"Nextcloud answered with a redirect to {target}; "
-                    "set NEXTCLOUD_MCP_BASE_URL to the final address."
+                    "set NEXTCLOUD_MCP_BASE_URL to the final address.",
+                    http_code(response.status_code),
                 )
             if response.status_code not in ok:
                 if response.status_code in (401, 429):
@@ -394,9 +430,28 @@ class NextcloudClient:
             raise
         except Exception as exc:
             logger.warning("%s response failed: %s", method, type(exc).__name__)
-            raise failure_error(exc, label) from None
+            raise self._failure(exc, label) from None
         finally:
-            await response.aclose()
+            try:
+                await response.aclose()
+            except Exception as exc:  # never let closing replace the result or the error
+                logger.debug("closing the response failed: %s", type(exc).__name__)
+
+    def _failure(self, exc: BaseException, label: str) -> ToolError:
+        """failure_error, with the gateway hook's public code when it provides one."""
+        error = failure_error(exc, label)
+        if self.public_error is not None:
+            try:
+                code = self.public_error(exc)
+            except Exception:
+                code = None
+            if is_public_code(code):
+                with_code(error, code)  # type: ignore[arg-type]
+        return error
+
+    def render(self, exc: ToolError) -> ToolError:
+        """The error as MCP clients see it (``CODE: text`` in code mode)."""
+        return render_error(exc, self.code_mode)
 
     @staticmethod
     async def _read_capped(
@@ -435,7 +490,10 @@ class NextcloudClient:
         :class:`ToolError` a tool would. It shares the user-id cache and the
         authentication latch: after a 401/429 it fails without contacting Nextcloud.
         """
-        user_id = await self._fetch_user_id()
+        try:
+            user_id = await self._fetch_user_id()
+        except ToolError as exc:
+            raise self.render(exc) from None
         if self._user_id is None:
             self._user_id = user_id
         return {"ok": True, "user_id": user_id}
@@ -455,21 +513,25 @@ class NextcloudClient:
         except NextcloudHTTPError as exc:
             if exc.status in (401, 429):
                 raise
-            raise ToolError(
+            raise coded(
                 f"Could not read the Nextcloud account ({exc.status}); check "
-                "NEXTCLOUD_MCP_BASE_URL points at the Nextcloud root."
+                "NEXTCLOUD_MCP_BASE_URL points at the Nextcloud root.",
+                http_code(exc.status),
             ) from None
         except BodyTooLarge:
-            raise ToolError("Nextcloud sent an unexpectedly large account answer.") from None
+            raise coded(
+                "Nextcloud sent an unexpectedly large account answer.", INVALID_RESPONSE
+            ) from None
         try:
             data = json.loads(reply.body)
             user_id = data["ocs"]["data"]["id"]
         except (ValueError, KeyError, TypeError):
             user_id = None
         if not isinstance(user_id, str) or not user_id:
-            raise ToolError(
+            raise coded(
                 "The address in NEXTCLOUD_MCP_BASE_URL did not answer like a Nextcloud "
-                "server; check that it is the Nextcloud root URL."
+                "server; check that it is the Nextcloud root URL.",
+                INVALID_RESPONSE,
             )
         return user_id
 

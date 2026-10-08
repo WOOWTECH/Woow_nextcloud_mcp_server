@@ -12,6 +12,7 @@ from defusedxml import ElementTree as SafeET
 from defusedxml.common import DefusedXmlException
 from fastmcp.exceptions import ToolError
 
+from .errors import INVALID_RESPONSE, with_code
 from .paths import normalize_etag
 
 DAV = "DAV:"
@@ -93,7 +94,9 @@ def parse_xml(body: bytes) -> Element:
     try:
         return SafeET.fromstring(body, forbid_dtd=True)
     except (DefusedXmlException, SafeET.ParseError, ValueError) as exc:
-        raise ToolError("Nextcloud sent an answer that is not valid WebDAV XML.") from exc
+        raise with_code(
+            ToolError("Nextcloud sent an answer that is not valid WebDAV XML."), INVALID_RESPONSE
+        ) from exc
 
 
 def parse_multistatus(body: bytes) -> list[DavResponse]:
@@ -104,7 +107,10 @@ def parse_multistatus(body: bytes) -> list[DavResponse]:
     """
     root = parse_xml(body)
     if root.tag != tag(DAV, "multistatus"):
-        raise ToolError("Nextcloud sent an answer that is not a WebDAV multistatus.")
+        raise with_code(
+            ToolError("Nextcloud sent an answer that is not a WebDAV multistatus."),
+            INVALID_RESPONSE,
+        )
     results: list[DavResponse] = []
     for response in root.findall(tag(DAV, "response")):
         href = (response.findtext(tag(DAV, "href")) or "").strip()

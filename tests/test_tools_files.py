@@ -709,3 +709,19 @@ async def test_changed_etag_has_no_note(tools: NextcloudTools, fake: FakeNextclo
     photo = fake.files["photo.png"].etag
     assert "note" not in await tools.upload_file("photo.png", "AAEC", photo)
     assert "note" not in await tools.upload_file("new.bin", "AAEC")
+
+
+async def test_note_when_the_fake_keeps_the_etag(
+    tools: NextcloudTools, fake: FakeNextcloud
+) -> None:
+    from nextcloud_mcp_server.tools import UNCHANGED_ETAG_NOTE
+
+    fake.keep_etag_on_put = True  # like Nextcloud for two writes within about a second
+    old = fake.files["Docs/readme.md"].etag
+    updated = await tools.update_text_file("Docs/readme.md", "v2", old)
+    assert updated["etag"] == old
+    assert updated["note"] == UNCHANGED_ETAG_NOTE
+    assert fake.files["Docs/readme.md"].data == b"v2"
+    photo = fake.files["photo.png"].etag
+    replaced = await tools.upload_file("photo.png", "AAEC", photo)
+    assert replaced["note"] == UNCHANGED_ETAG_NOTE

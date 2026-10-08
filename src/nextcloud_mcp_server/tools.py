@@ -7,7 +7,7 @@ import base64
 import binascii
 import logging
 import mimetypes
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal, NotRequired
 from urllib.parse import quote, unquote, urlsplit
 
@@ -21,7 +21,16 @@ from typing_extensions import TypedDict
 
 from .caldav import calendar_entry, is_done, sort_tasks, tasks_from_report
 from .client import BodyTooLarge, NextcloudClient
-from .errors import GatewayDenied, NextcloudHTTPError, Operation, stale_message
+from .errors import (
+    ETAG_MISMATCH,
+    INVALID_RESPONSE,
+    GatewayDenied,
+    NextcloudHTTPError,
+    Operation,
+    coded,
+    http_code,
+    stale_message,
+)
 from .paths import (
     caller_etag,
     display_path,
@@ -123,6 +132,7 @@ class TaskList(TypedDict):
     tasks: list[TaskInfo]
     truncated: bool
     skipped_large_objects: int
+    skipped_calendars: NotRequired[int]
 
 
 class CreatedFile(TypedDict):
@@ -252,6 +262,13 @@ class NextcloudTools:
         self.nc = nc
         self.settings = settings
 
+    async def run(self, call: Awaitable[Any]) -> Any:
+        """Await a tool body and render its ToolError for MCP (code mode prefixes)."""
+        try:
+            return await call
+        except ToolError as exc:
+            raise self.nc.render(exc) from None
+
     # -- helpers -------------------------------------------------------------------
 
     async def _propfind(
@@ -274,7 +291,9 @@ class NextcloudTools:
                 ok=(207,),
             )
         except BodyTooLarge:
-            raise ToolError(f'The listing of "{label}" is too large to process.') from None
+            raise coded(
+                f'The listing of "{label}" is too large to process.', INVALID_RESPONSE
+            ) from None
         return await _offload(len(reply.body), parse_multistatus, reply.body)
 
     async def _entries(
@@ -312,17 +331,18 @@ class NextcloudTools:
                 # empty folder) describes the requested resource itself.
                 own = file_entry(items[0], normalized)  # type: ignore[assignment]
             else:
-                raise ToolError(
+                raise coded(
                     f"Nextcloud answered with paths outside {unquote(home_path)}; check "
                     "NEXTCLOUD_MCP_BASE_URL and, behind a reverse proxy, the 'overwritewebroot' "
-                    "setting of Nextcloud."
+                    "setting of Nextcloud.",
+                    INVALID_RESPONSE,
                 )
         return own, children
 
     async def _stat(self, normalized: str, *, op: Operation = "read") -> FileEntry:
         own, _ = await self._entries(normalized, "0", op=op)
         if own is None:
-            raise ToolError(f'"{display_path(normalized)}" does not exist.')
+            raise coded(f'"{display_path(normalized)}" does not exist.', http_code(404))
         return own
 
     async def _current_state(self, url: str, label: str) -> tuple[bool, str | None]:
@@ -345,8 +365,8 @@ class NextcloudTools:
         """Explain a 412 on a guarded write: the file is gone, or it changed."""
         exists, etag = await self._current_state(url, label)
         if not exists:
-            return ToolError(f'"{label}" does not exist; {missing_hint}.')
-        return ToolError(stale_message(label, etag))
+            return coded(f'"{label}" does not exist; {missing_hint}.', http_code(404))
+        return coded(stale_message(label, etag), http_code(412))
 
     async def _etag_after_write(self, url: str, label: str, headers: Any) -> str | None:
         etag = normalize_etag(headers.get("etag") or headers.get("oc-etag"))
@@ -379,9 +399,10 @@ class NextcloudTools:
     def _too_large(self, label: str, size: int | None = None) -> ToolError:
         limit = self.settings.max_text_bytes
         size_text = f"{size} bytes, " if size is not None else ""
-        return ToolError(
+        return coded(
             f'"{label}" is too large for the text tools ({size_text}limit {limit} bytes, '
-            "NEXTCLOUD_MCP_MAX_TEXT_BYTES)."
+            "NEXTCLOUD_MCP_MAX_TEXT_BYTES).",
+            INVALID_RESPONSE,
         )
 
     # -- read tools ----------------------------------------------------------------
@@ -499,9 +520,10 @@ class NextcloudTools:
             )
         except NextcloudHTTPError as exc:
             if exc.status == 404:
-                raise ToolError(
+                raise coded(
                     "This account has no calendar home; the calendar (CalDAV) service may be "
-                    "disabled on this Nextcloud."
+                    "disabled on this Nextcloud.",
+                    http_code(404),
                 ) from None
             raise
         calendars: list[CalendarInfo] = []
@@ -538,6 +560,7 @@ class NextcloudTools:
             targets = [c for c in calendars if "VTODO" in c["components"]]
         tasks: list[dict[str, Any]] = []
         skipped = 0
+        skipped_calendars = 0
         for target in targets:
             url = f"{home}{quote(target['id'], safe='')}/"
             try:
@@ -551,12 +574,21 @@ class NextcloudTools:
                     ok=(207,),
                 )
             except BodyTooLarge:
-                raise ToolError(
-                    f'The tasks of calendar "{target["id"]}" are too large to process.'
+                raise coded(
+                    f'The tasks of calendar "{target["id"]}" are too large to process.',
+                    INVALID_RESPONSE,
                 ) from None
             except NextcloudHTTPError as exc:
                 if calendar is None and exc.status in (403, 404):
                     logger.info("skipped a calendar that could not be read")
+                    skipped_calendars += 1
+                    continue
+                raise
+            except GatewayDenied:
+                if calendar is None:
+                    # e.g. a calendar id containing '%' that the gateway refuses
+                    logger.info("skipped a calendar the gateway refused")
+                    skipped_calendars += 1
                     continue
                 raise
             found, too_large = await _offload(
@@ -569,11 +601,14 @@ class NextcloudTools:
         ordered = sort_tasks(tasks)
         for task in ordered:
             task.pop("_due_sort", None)
-        return {
+        result: TaskList = {
             "tasks": ordered[:limit],  # type: ignore[typeddict-item]
             "truncated": len(ordered) > limit,
             "skipped_large_objects": skipped,
         }
+        if skipped_calendars:
+            result["skipped_calendars"] = skipped_calendars
+        return result
 
     # -- write tools ---------------------------------------------------------------
 
@@ -700,7 +735,8 @@ class NextcloudTools:
         if entry["type"] == "folder":
             raise ToolError(f'"{normalized}" is a folder; this tool deletes single files only.')
         if entry["etag"] and entry["etag"] != expected:
-            raise ToolError(stale_message(normalized, entry["etag"]))
+            # local pre-check: nothing was sent to delete the file
+            raise coded(stale_message(normalized, entry["etag"]), ETAG_MISMATCH)
         url = await self.nc.file_url(normalized)
         try:
             await self.nc.send(
@@ -754,7 +790,9 @@ DESCRIPTIONS: dict[str, str] = {
         "at most `limit` tasks, truncated=true when more exist. Descriptions are cut at "
         "500 characters. Recurring tasks are not expanded: due/start are those of the first "
         "occurrence; objects holding only changed occurrences are skipped, and objects over "
-        "1 MiB are counted in skipped_large_objects. Read-only: this server cannot change tasks."
+        "1 MiB or nested deeper than 32 levels are counted in skipped_large_objects; calendars "
+        "that could not be read (only when no calendar is given) are counted in "
+        "skipped_calendars. Read-only: this server cannot change tasks."
     ),
     "create_text_file": (
         "Create a NEW text file with the given UTF-8 content. Never overwrites: if the file "
@@ -817,39 +855,39 @@ def _annotations(name: str) -> ToolAnnotations:
 
 def _functions(impl: NextcloudTools) -> dict[str, Callable[..., Any]]:
     async def get_file_tree(path: FolderArg = "", depth: DepthArg = 1) -> FileTree:
-        return await impl.get_file_tree(path, depth)
+        return await impl.run(impl.get_file_tree(path, depth))
 
     async def get_file_content(path: PathArg) -> str:
-        return await impl.get_file_content(path)
+        return await impl.run(impl.get_file_content(path))
 
     async def read_text_file(path: PathArg) -> TextFile:
-        return await impl.read_text_file(path)
+        return await impl.run(impl.read_text_file(path))
 
     async def list_calendars() -> CalendarList:
-        return await impl.list_calendars()
+        return await impl.run(impl.list_calendars())
 
     async def list_tasks(
         calendar: CalendarArg = None,
         include_completed: IncludeCompletedArg = False,
         limit: LimitArg = 100,
     ) -> TaskList:
-        return await impl.list_tasks(calendar, include_completed, limit)
+        return await impl.run(impl.list_tasks(calendar, include_completed, limit))
 
     async def create_text_file(path: PathArg, content: ContentArg) -> CreatedFile:
-        return await impl.create_text_file(path, content)
+        return await impl.run(impl.create_text_file(path, content))
 
     async def update_text_file(
         path: PathArg, content: ContentArg, expected_etag: EtagArg
     ) -> UpdatedFile:
-        return await impl.update_text_file(path, content, expected_etag)
+        return await impl.run(impl.update_text_file(path, content, expected_etag))
 
     async def upload_file(
         path: PathArg, content_base64: Base64Arg, expected_etag: OptionalEtagArg = None
     ) -> UploadedFile:
-        return await impl.upload_file(path, content_base64, expected_etag)
+        return await impl.run(impl.upload_file(path, content_base64, expected_etag))
 
     async def delete_file_checked(path: PathArg, expected_etag: EtagArg) -> DeletedFile:
-        return await impl.delete_file_checked(path, expected_etag)
+        return await impl.run(impl.delete_file_checked(path, expected_etag))
 
     return {
         "get_file_tree": get_file_tree,

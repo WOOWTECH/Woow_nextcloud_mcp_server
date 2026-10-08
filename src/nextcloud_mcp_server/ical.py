@@ -9,6 +9,7 @@ whole object, because calendars are written by many different clients.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -187,15 +188,26 @@ def parse_int(prop: Property | None) -> int | None:
         return None
 
 
+MAX_NESTING = 32
+
+
+class ObjectTooDeep(ValueError):
+    """Components nested deeper than :data:`MAX_NESTING`; the object is skipped."""
+
+
 def components(text: str, wanted: str) -> list[dict[str, Property]]:
     """Properties (first occurrence of each name) of every ``wanted`` component.
 
     Nested sub-components (for example a VALARM inside a VTODO) do not contribute
-    their properties. Components that are never closed are dropped.
+    their properties. Components that are never closed are dropped. Raises
+    :class:`ObjectTooDeep` when components nest deeper than :data:`MAX_NESTING`.
+    Linear in the input: open component names are tracked with a counter, so an END
+    for a name that is not open is detected in O(1).
     """
     wanted = wanted.upper()
     found: list[dict[str, Property]] = []
     stack: list[str] = []
+    open_names: Counter[str] = Counter()
     current: dict[str, Property] | None = None
     current_depth = -1
     for line in unfold(text):
@@ -203,16 +215,21 @@ def components(text: str, wanted: str) -> list[dict[str, Property]]:
         if prop is None:
             continue
         if prop.name == "BEGIN":
-            stack.append(prop.value.strip().upper())
-            if stack[-1] == wanted and current is None:
+            name = prop.value.strip().upper()
+            if len(stack) >= MAX_NESTING:
+                raise ObjectTooDeep(f"components nested deeper than {MAX_NESTING}")
+            stack.append(name)
+            open_names[name] += 1
+            if name == wanted and current is None:
                 current = {}
                 current_depth = len(stack)
             continue
         if prop.name == "END":
             name = prop.value.strip().upper()
-            if name in stack:
+            if open_names[name] > 0:
                 while stack:
                     closed = stack.pop()
+                    open_names[closed] -= 1
                     if current is not None and len(stack) < current_depth:
                         if closed == wanted and name == wanted:
                             found.append(current)

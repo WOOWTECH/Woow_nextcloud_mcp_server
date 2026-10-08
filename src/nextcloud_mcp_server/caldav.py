@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from .ical import Property, components, parse_date_value, parse_int, unescape_text
+from .ical import ObjectTooDeep, Property, components, parse_date_value, parse_int, unescape_text
 from .webdav import APPLE_ICAL, CALDAV, DAV, DavResponse, parse_multistatus, tag
 
 ALL_COMPONENTS = ["VEVENT", "VJOURNAL", "VTODO"]
@@ -131,7 +131,10 @@ def parse_tasks(calendar_id: str, ics: str) -> list[dict[str, Any]]:
 
 
 def tasks_from_report(calendar_id: str, body: bytes) -> tuple[list[dict[str, Any]], int]:
-    """Tasks of a ``calendar-query`` REPORT answer and the number of skipped large objects.
+    """Tasks of a ``calendar-query`` REPORT answer and the number of skipped objects.
+
+    Objects are skipped when larger than :data:`MAX_OBJECT_CHARS` or nested deeper than
+    :data:`~nextcloud_mcp_server.ical.MAX_NESTING`.
 
     CPU-bound; callers run it in a worker thread for large answers.
     """
@@ -145,7 +148,10 @@ def tasks_from_report(calendar_id: str, body: bytes) -> tuple[list[dict[str, Any
         if len(text) > MAX_OBJECT_CHARS:
             skipped += 1
             continue
-        tasks.extend(parse_tasks(calendar_id, text))
+        try:
+            tasks.extend(parse_tasks(calendar_id, text))
+        except ObjectTooDeep:
+            skipped += 1  # nested deeper than MAX_NESTING: skipped as a whole
     return tasks, skipped
 
 

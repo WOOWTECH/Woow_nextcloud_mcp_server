@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import ssl
 from typing import Literal
 
 import httpx
 from fastmcp.exceptions import ToolError
+
+from .paths import display_etag
 
 Operation = Literal[
     "read",
@@ -31,8 +34,50 @@ THROTTLED_MESSAGE = (
 )
 
 
+# Public error codes ("code mode", see SPEC): prefixed to messages of errors caused by a
+# backend answer or a transport problem when code mode is on.
+INVALID_RESPONSE = "BACKEND_INVALID_RESPONSE"
+TIMEOUT = "BACKEND_TIMEOUT"
+UNAVAILABLE = "BACKEND_UNAVAILABLE"
+DESTINATION_DENIED = "BACKEND_DESTINATION_DENIED"
+BUSY = "BACKEND_BUSY"
+ETAG_MISMATCH = "ETAG_MISMATCH"
+
+_PUBLIC_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}(?: status=[1-5]\d\d)?$")
+
+
+def http_code(status: int) -> str:
+    return f"BACKEND_HTTP_ERROR status={int(status)}"
+
+
+def is_public_code(value: object) -> bool:
+    return isinstance(value, str) and bool(_PUBLIC_CODE.match(value))
+
+
+def with_code(exc: ToolError, code: str) -> ToolError:
+    """Attach a public code to a ToolError (shown only in code mode)."""
+    exc.code = code  # type: ignore[attr-defined]
+    return exc
+
+
+def coded(message: str, code: str) -> ToolError:
+    return with_code(ToolError(message), code)
+
+
+def render_error(exc: ToolError, code_mode: bool) -> ToolError:
+    """The error as the MCP client sees it: ``CODE: text`` in code mode, else unchanged."""
+    code = getattr(exc, "code", None)
+    if not code_mode or not is_public_code(code):
+        return exc
+    rendered = ToolError(f"{code}: {exc}")
+    rendered.code = code  # type: ignore[attr-defined]
+    return rendered
+
+
 class GatewayDenied(ToolError):
     """The gateway's backend_policy refused the destination or path."""
+
+    code = DESTINATION_DENIED
 
 
 class NextcloudHTTPError(ToolError):
@@ -41,13 +86,12 @@ class NextcloudHTTPError(ToolError):
     def __init__(self, message: str, status: int) -> None:
         super().__init__(message)
         self.status = status
+        self.code = http_code(status)
 
 
 def stale_message(label: str, current_etag: str | None) -> str:
-    return (
-        f'"{label}" changed since it was read (current etag {current_etag or "unknown"}); '
-        "read it again and retry."
-    )
+    shown = display_etag(current_etag) or "unknown"
+    return f'"{label}" changed since it was read (current etag {shown}); read it again and retry.'
 
 
 def status_message(
@@ -116,6 +160,17 @@ def network_message(exc: httpx.TransportError) -> str:
     else:
         reason = f"network error {type(exc).__name__}"
     return f"Could not reach Nextcloud ({reason})."
+
+
+def failure_code(exc: BaseException) -> str:
+    """Public code for an exception that is not an HTTP status answer."""
+    if isinstance(exc, httpx.TimeoutException | TimeoutError):
+        return TIMEOUT
+    if isinstance(exc, httpx.TransportError):
+        return UNAVAILABLE
+    if isinstance(exc, httpx.HTTPError | httpx.StreamError | UnicodeError | ValueError):
+        return INVALID_RESPONSE
+    return UNAVAILABLE
 
 
 def http_error_message(exc: Exception) -> str:
