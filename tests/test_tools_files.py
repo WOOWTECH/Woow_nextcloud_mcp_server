@@ -676,3 +676,36 @@ async def test_write_answer_too_large_is_a_tool_error(
     )
     with pytest.raises(ToolError, match=r'answer for "big.txt" is larger than 3 bytes'):
         await tools.create_text_file("big.txt", "x")
+
+
+async def test_unchanged_etag_after_write_adds_note(
+    tools: NextcloudTools, fake: FakeNextcloud
+) -> None:
+    from nextcloud_mcp_server.tools import UNCHANGED_ETAG_NOTE
+
+    old = fake.files["Docs/readme.md"].etag
+    keep = {"etag": old}
+
+    def override(request: httpx.Request) -> httpx.Response | None:
+        if request.method == "PUT":
+            return httpx.Response(204, headers={"ETag": f'"{keep["etag"]}"'})
+        return None
+
+    fake.override = override
+    updated = await tools.update_text_file("Docs/readme.md", "x", old)
+    assert updated["etag"] == old
+    assert updated["note"] == UNCHANGED_ETAG_NOTE
+
+    photo = fake.files["photo.png"].etag
+    keep["etag"] = photo
+    replaced = await tools.upload_file("photo.png", "AAEC", photo)
+    assert replaced["status"] == "replaced"
+    assert replaced["note"] == UNCHANGED_ETAG_NOTE
+
+
+async def test_changed_etag_has_no_note(tools: NextcloudTools, fake: FakeNextcloud) -> None:
+    old = fake.files["Docs/readme.md"].etag
+    assert "note" not in await tools.update_text_file("Docs/readme.md", "x", old)
+    photo = fake.files["photo.png"].etag
+    assert "note" not in await tools.upload_file("photo.png", "AAEC", photo)
+    assert "note" not in await tools.upload_file("new.bin", "AAEC")

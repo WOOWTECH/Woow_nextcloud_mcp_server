@@ -8,7 +8,7 @@ import binascii
 import logging
 import mimetypes
 from collections.abc import Callable
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NotRequired
 from urllib.parse import quote, unquote, urlsplit
 
 from fastmcp import FastMCP
@@ -46,6 +46,12 @@ logger = logging.getLogger("nextcloud_mcp_server")
 
 XML_CONTENT_TYPE = "application/xml; charset=utf-8"
 OFFLOAD_BYTES = 256 * 1024  # parse answers larger than this in a worker thread
+# Nextcloud's ETags have about one-second resolution for writes to the same file: a
+# second write within that second may keep the old ETag (or still match it).
+UNCHANGED_ETAG_NOTE = (
+    "Nextcloud did not change the etag; wait a second before the next conditional write "
+    "to this file."
+)
 DELETE_NOTE = "Moved to the Nextcloud trash bin when the Deleted files app is enabled."
 _MIME = mimetypes.MimeTypes()  # built-in table only: same answer on every platform
 
@@ -132,6 +138,7 @@ class UpdatedFile(TypedDict):
     previous_etag: str
     etag: str | None
     bytes: int
+    note: NotRequired[str]
 
 
 class UploadedFile(TypedDict):
@@ -139,6 +146,7 @@ class UploadedFile(TypedDict):
     path: str
     etag: str | None
     bytes: int
+    note: NotRequired[str]
 
 
 class DeletedFile(TypedDict):
@@ -615,13 +623,16 @@ class NextcloudTools:
                 ) from None
             raise
         etag = await self._etag_after_write(url, normalized, reply.headers)
-        return {
+        result: UpdatedFile = {
             "status": "updated",
             "path": normalized,
             "previous_etag": previous,
             "etag": etag,
             "bytes": len(data),
         }
+        if etag == previous:
+            result["note"] = UNCHANGED_ETAG_NOTE
+        return result
 
     def _decode_upload(self, content_base64: str) -> bytes:
         cleaned = "".join(content_base64.split())
@@ -670,12 +681,15 @@ class NextcloudTools:
                 ) from None
             raise
         etag = await self._etag_after_write(url, normalized, reply.headers)
-        return {
+        uploaded: UploadedFile = {
             "status": "created" if previous is None else "replaced",
             "path": normalized,
             "etag": etag,
             "bytes": len(data),
         }
+        if previous is not None and etag == previous:
+            uploaded["note"] = UNCHANGED_ETAG_NOTE
+        return uploaded
 
     # -- delete tool ---------------------------------------------------------------
 

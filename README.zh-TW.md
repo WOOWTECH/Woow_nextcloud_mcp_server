@@ -205,6 +205,10 @@ Nextcloud，直到伺服器行程重新啟動（WOOW 閘道在連線設定變更
   `If-Match: "<etag>"`（建立新檔則送 `If-None-Match: *`）。只接受 ASCII 的 etag 字元
   （RFC 9110 `etagc`）。發生衝突時會回報目前的 etag（或說明檔案已不存在），模型應重新
   讀取檔案，而不是盲目重試。
+* **ETag 解析度**：Nextcloud 對同一檔案的寫入，ETag 大約只有一秒的解析度。約一秒內對同一
+  檔案的兩次寫入可能無法區分：ETag 可能不變，或舊的 ETag 仍被接受。因此 `If-Match` 能防護
+  的是相隔一秒以上的他人修改。更新或取代後若回傳的 etag 與送出的相同，結果會附上 `note`，
+  提醒對該檔案下一次條件式寫入前先等一秒。
 * **文字檔**必須是合法 UTF-8、不含 NUL 位元組，且不超過 `MAX_TEXT_BYTES`。UTF-8 的
   BOM 會從 `content` 移除，但仍計入 `bytes`。
 * **刪除**的檔案在啟用「已刪除的檔案」App 時會移到 Nextcloud 垃圾桶。

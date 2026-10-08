@@ -231,6 +231,20 @@ Claude Code / Claude Desktop config examples (stdio), gateway usage; `CHANGELOG.
 (lint, tests on 3.11/3.13, licence check); `pyproject.toml` (hatchling) and
 `uv.lock`.
 
+## 11. Known limitations
+
+* **ETag resolution (observed on Nextcloud 35.0.1).** Nextcloud's ETags have about
+  one-second resolution for writes to the same file. Two writes to one file within about
+  a second may not be told apart: the second write may leave the ETag unchanged, or a
+  conditional write with the ETag from before the first write may still be accepted.
+  `If-Match` therefore protects against edits made by others more than ~1 s apart, not
+  against back-to-back writes within the same second. When `update_text_file` or a
+  replacing `upload_file` returns an `etag` equal to the `expected_etag` it was given,
+  the result additionally contains
+  `note: "Nextcloud did not change the etag; wait a second before the next conditional write to this file."`
+  Integration tests wait at least 1.1 s after a write before a conditional write that
+  tests stale-etag refusal.
+
 ## Clean-room rule
 
 The implementer must not open, copy, paraphrase or port code from: the Nextcloud

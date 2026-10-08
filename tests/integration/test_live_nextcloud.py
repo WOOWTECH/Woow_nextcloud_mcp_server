@@ -9,13 +9,15 @@ Optional: NEXTCLOUD_MCP_IT_VERIFY_TLS=false for a LAN server with a private CA.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib.util
 import os
 import secrets
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import quote
 
 import httpx
@@ -58,6 +60,15 @@ def _settings(**overrides: object) -> Settings:
     return Settings(_env_file=None, **values)  # type: ignore[call-arg]
 
 
+WRITE_TOOLS = {"create_text_file", "update_text_file", "upload_file", "delete_file_checked"}
+
+# Nextcloud's ETags have about one-second resolution for writes to the same file: a
+# conditional write less than ~1 s after the previous write may keep the old ETag, or the
+# old ETag may still match. Tests of stale-etag refusal therefore wait this long after
+# the last write to the file before the conditional write (verified on Nextcloud 35).
+ETAG_RESOLUTION = 1.1
+
+
 @dataclass
 class Live:
     client: Client
@@ -65,11 +76,22 @@ class Live:
     folder: str
     files_home: str
     calendars_home: str
+    last_write: dict[str, float] = field(default_factory=dict)
 
     async def call(self, tool: str, arguments: dict) -> dict:
         result = await self.client.call_tool_mcp(tool, arguments)
         assert result.isError is False, (tool, result.content)
+        if tool in WRITE_TOOLS:
+            self.last_write[arguments["path"]] = time.monotonic()
         return result.structuredContent
+
+    async def settle(self, path: str) -> None:
+        """Wait until ETAG_RESOLUTION has passed since the last write to ``path``."""
+        last = self.last_write.get(path)
+        if last is not None:
+            remaining = ETAG_RESOLUTION - (time.monotonic() - last)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
 
     async def fails(self, tool: str, arguments: dict) -> str:
         result = await self.client.call_tool_mcp(tool, arguments)
@@ -118,6 +140,7 @@ async def test_file_lifecycle_with_special_names() -> None:
                     )
                     continue
                 created = result.structuredContent
+                nc.last_write[path] = time.monotonic()
             else:
                 created = await nc.call("create_text_file", {"path": path, "content": "one\n"})
             assert created["status"] == "created" and created["etag"]
@@ -132,6 +155,7 @@ async def test_file_lifecycle_with_special_names() -> None:
             text = await nc.client.call_tool_mcp("get_file_content", {"path": path})
             assert text.content[0].text == "one\n"
 
+            await nc.settle(path)
             updated = await nc.call(
                 "update_text_file",
                 {"path": path, "content": "two\n", "expected_etag": read["etag"]},
@@ -139,6 +163,7 @@ async def test_file_lifecycle_with_special_names() -> None:
             assert updated["previous_etag"] == read["etag"]
             assert updated["etag"] != read["etag"]
 
+            await nc.settle(path)
             stale = await nc.fails(
                 "update_text_file",
                 {"path": path, "content": "three\n", "expected_etag": read["etag"]},
@@ -147,6 +172,7 @@ async def test_file_lifecycle_with_special_names() -> None:
             assert updated["etag"] in stale
             assert (await nc.call("read_text_file", {"path": path}))["content"] == "two\n"
 
+            await nc.settle(path)
             stale_delete = await nc.fails(
                 "delete_file_checked", {"path": path, "expected_etag": read["etag"]}
             )
@@ -175,11 +201,13 @@ async def test_upload_create_replace_and_binary_refusal() -> None:
         assert "already exists" in await nc.fails(
             "upload_file", {"path": path, "content_base64": "AAEC"}
         )
+        await nc.settle(path)
         replaced = await nc.call(
             "upload_file",
             {"path": path, "content_base64": "AAEC", "expected_etag": created["etag"]},
         )
         assert replaced["status"] == "replaced" and replaced["bytes"] == 3
+        await nc.settle(path)
         stale = await nc.fails(
             "upload_file",
             {"path": path, "content_base64": "AAEC", "expected_etag": created["etag"]},

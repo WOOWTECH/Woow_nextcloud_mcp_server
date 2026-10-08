@@ -226,6 +226,12 @@ when the connection settings change).
   Only ASCII etag characters (RFC 9110 `etagc`) are accepted. A conflict answers with the
   current etag (or says the file no longer exists); the model should read the file again
   instead of retrying blindly.
+* **ETag resolution**: Nextcloud's ETags have about one-second resolution for writes to
+  the same file. Two writes to one file within about a second may not be told apart: the
+  ETag may stay the same, or the older ETag may still be accepted. `If-Match` therefore
+  protects against changes made by others more than ~1 s apart. When an update or
+  replace returns the same etag it was given, the result carries a `note` asking to wait
+  a second before the next conditional write to that file.
 * **Text files** must be valid UTF-8 without NUL bytes and not larger than
   `MAX_TEXT_BYTES`. A UTF-8 byte-order mark is removed from `content` but counted in
   `bytes`.

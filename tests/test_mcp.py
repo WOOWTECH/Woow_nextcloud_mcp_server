@@ -300,3 +300,12 @@ async def test_tls_settings_ignored_under_policy_warns(
     create_server(make_settings(verify_tls=False))
     messages = [r.getMessage() for r in caplog.records]
     assert any("ignored: backend_policy owns TLS verification" in m for m in messages)
+
+
+async def test_note_is_optional_in_output_schemas(settings, fake: FakeNextcloud) -> None:
+    async with Client(create_server(settings, transport=fake.transport)) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    for name in ("update_text_file", "upload_file"):
+        schema = tools[name].outputSchema
+        assert "note" in schema["properties"]
+        assert "note" not in schema["required"]

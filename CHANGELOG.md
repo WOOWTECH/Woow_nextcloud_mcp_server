@@ -26,6 +26,17 @@ All notable changes to this project are documented here. The format follows
   with `%`), sets `truncated=true` and lists the rest, instead of failing completely.
 - Tests: the fake server answers 428 to an unconditional PUT over an existing file, and
   a test proves `upload_file` without `expected_etag` never overwrites.
+- Integration tests wait 1.1 s after a write before a conditional write that tests
+  stale-etag refusal: Nextcloud's ETags have about one-second resolution for writes to the
+  same file, which made the stale-upload test flaky.
+
+### Known limitations
+
+- Two writes to the same file within about one second may not be told apart by
+  Nextcloud (the ETag may stay the same, or the old ETag may still match), so `If-Match`
+  protects against edits by others more than ~1 s apart. `update_text_file` and a
+  replacing `upload_file` now add a `note` to the result when the returned etag equals
+  the `expected_etag` sent. Documented in README (en/zh-TW) and SPEC.md section 11.
 
 ## 0.1.1 - 2026-10-08
 
