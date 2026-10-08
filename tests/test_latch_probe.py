@@ -9,7 +9,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from fake_nextcloud import USER_ID, FakeNextcloud
+from fake_nextcloud import PASSWORD, USER_ID, FakeNextcloud
 from nextcloud_mcp_server.client import NextcloudClient
 from nextcloud_mcp_server.errors import AUTH_LATCHED_MESSAGE, THROTTLED_MESSAGE
 from nextcloud_mcp_server.server import create_server
@@ -184,3 +184,188 @@ async def test_fake_refuses_unconditional_overwrite(fake: FakeNextcloud) -> None
             content=b"x",
         )
     assert answer.status_code == 428
+
+
+# ----------------------------------------------------------------- per-credentials latch
+
+
+def _counting(status_for_password: dict[str, int]):
+    """Handler answering by password: 200 with a user id, or the given error status."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        token = request.headers["Authorization"].split()[1]
+        password = base64.b64decode(token).decode().split(":", 1)[1]
+        seen.append(password)
+        status = status_for_password.get(password, 200)
+        if status != 200:
+            return httpx.Response(status)
+        return httpx.Response(200, json={"ocs": {"data": {"id": USER_ID}}})
+
+    return handler, seen
+
+
+async def test_other_credentials_are_not_latched(make_settings) -> None:
+    handler, seen = _counting({"wrong-pass": 401})
+    bad = NextcloudClient(
+        make_settings(app_password="wrong-pass"), transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(ToolError, match="Fix the credentials"):
+        await bad.probe()
+    with pytest.raises(ToolError, match="Fix the credentials"):
+        await bad.probe()
+    assert seen == ["wrong-pass"]
+
+    # the operator saves the correct password: a new client with it is not blocked
+    good = NextcloudClient(
+        make_settings(app_password="right-pass"), transport=httpx.MockTransport(handler)
+    )
+    assert await good.probe() == {"ok": True, "user_id": USER_ID}
+    assert seen == ["wrong-pass", "right-pass"]
+
+    # a new client with the known-bad password still never retries
+    again = NextcloudClient(
+        make_settings(app_password="wrong-pass"), transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(ToolError, match="Fix the credentials"):
+        await again.probe()
+    assert seen == ["wrong-pass", "right-pass"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"username": "bob"}, {"base_url": "https://other.example.com"}],
+)
+async def test_latch_is_keyed_by_user_and_server(make_settings, change) -> None:
+    handler, seen = _counting({"pw": 401})
+    first = NextcloudClient(
+        make_settings(app_password="pw"), transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(ToolError):
+        await first.probe()
+    other = NextcloudClient(
+        make_settings(app_password="pw", **change), transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(ToolError, match="Fix the credentials"):
+        await other.probe()
+    assert len(seen) == 2  # the other identity was tried once
+
+
+def test_latch_key_holds_no_password(make_settings) -> None:
+    from nextcloud_mcp_server.client import latch_key
+
+    secret = "Very-Secret-App-Password-123"
+    key = latch_key(make_settings(app_password=secret, base_url="HTTPS://Cloud.Example.com/NC"))
+    assert secret not in repr(key)
+    assert key[0] == "https://cloud.example.com/NC"
+    assert len(key[2]) == 64
+    assert key == latch_key(
+        make_settings(app_password=secret, base_url="https://cloud.example.com/NC/")
+    )
+
+
+async def test_latch_log_has_no_key(make_settings, caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    handler, _ = _counting({"secret-pw": 401})
+    nc = NextcloudClient(
+        make_settings(app_password="secret-pw"), transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(ToolError):
+        await nc.probe()
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert nc.latch_key[2] not in text
+    assert "secret-pw" not in text
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected"),
+    [
+        (None, 300),
+        ("120", 120),
+        ("0", 1),
+        ("99999", 900),
+        ("soon", 300),
+    ],
+)
+def test_retry_after_seconds(retry_after, expected) -> None:
+    from nextcloud_mcp_server.client import retry_after_seconds
+
+    assert retry_after_seconds(retry_after) == expected
+
+
+def test_retry_after_http_date() -> None:
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+
+    from nextcloud_mcp_server.client import retry_after_seconds
+
+    future = format_datetime(datetime.now(UTC) + timedelta(seconds=600), usegmt=True)
+    assert 590 <= retry_after_seconds(future) <= 600
+    assert retry_after_seconds(format_datetime(datetime(2000, 1, 1, tzinfo=UTC), usegmt=True)) == 1
+
+
+@pytest.mark.parametrize(("retry_after", "wait"), [(None, 300), ("60", 60), ("3600", 900)])
+async def test_429_latch_expires(settings, monkeypatch, retry_after, wait) -> None:
+    import nextcloud_mcp_server.client as client_module
+
+    now = [1000.0]
+    monkeypatch.setattr(client_module, "_clock", lambda: now[0])
+    answers = [429, 200]
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        status = answers[len(seen)]
+        seen.append(status)
+        if status == 429:
+            headers = {"Retry-After": retry_after} if retry_after else {}
+            return httpx.Response(429, headers=headers)
+        return httpx.Response(200, json={"ocs": {"data": {"id": USER_ID}}})
+
+    nc = NextcloudClient(settings, transport=httpx.MockTransport(handler))
+    with pytest.raises(ToolError, match="throttling"):
+        await nc.probe()
+    now[0] += wait - 1
+    with pytest.raises(ToolError, match="throttling"):
+        await nc.probe()
+    assert len(seen) == 1  # still latched
+    now[0] += 1
+    assert await nc.probe() == {"ok": True, "user_id": USER_ID}
+    assert len(seen) == 2
+
+
+async def test_429_from_gateway_hook_uses_default_expiry(settings, fake, monkeypatch) -> None:
+    import nextcloud_mcp_server.client as client_module
+
+    now = [0.0]
+    monkeypatch.setattr(client_module, "_clock", lambda: now[0])
+    fake.override = lambda r: httpx.Response(429)
+    nc = NextcloudClient(settings, policy=realistic_policy(GatewayTransport(fake.transport), []))
+    await nc.user_id()
+    with pytest.raises(ToolError, match="throttling"):
+        await NextcloudTools(nc, settings).get_file_tree("")
+    before = len(fake.requests)
+    now[0] = 299
+    with pytest.raises(ToolError, match="throttling"):
+        await NextcloudTools(nc, settings).get_file_tree("")
+    assert len(fake.requests) == before
+    now[0] = 300
+    fake.override = None
+    assert (await NextcloudTools(nc, settings).get_file_tree(""))["entries"]
+    await nc.aclose()
+
+
+async def test_401_never_expires(settings, monkeypatch) -> None:
+    import nextcloud_mcp_server.client as client_module
+
+    now = [0.0]
+    monkeypatch.setattr(client_module, "_clock", lambda: now[0])
+    handler, seen = _counting({PASSWORD: 401})
+    nc = NextcloudClient(settings, transport=httpx.MockTransport(handler))
+    with pytest.raises(ToolError):
+        await nc.probe()
+    now[0] = 10**9
+    with pytest.raises(ToolError, match="Fix the credentials"):
+        await nc.probe()
+    assert len(seen) == 1

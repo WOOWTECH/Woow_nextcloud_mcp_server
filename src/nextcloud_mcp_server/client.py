@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import inspect
 import json
 import logging
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
 
@@ -113,30 +117,89 @@ def failure_error(exc: BaseException, label: str) -> ToolError:
     return ToolError(f"Nextcloud returned an error ({type(exc).__name__}); try again later.")
 
 
-# Process-wide authentication latch (brute-force protection). After the first 401 or 429
-# from Nextcloud no further request is sent until the process restarts: every failed
-# Basic-auth login counts against the client IP and can get it throttled or banned.
-_auth_latch: NextcloudHTTPError | None = None
+# Authentication latch (brute-force protection). After a 401 or 429 from Nextcloud no
+# further request is sent with the same credentials: every failed Basic-auth login
+# counts against the client IP and can get it throttled or banned. The latch is
+# process-wide but keyed by (base URL, username, SHA-256 of the app password), so other
+# clients in the same process with the same credentials share it, while a client built
+# with different (e.g. corrected) credentials is not affected. A 401 stays latched until
+# the process restarts; a 429 expires after Retry-After (capped) or a default period.
+THROTTLE_DEFAULT_SECONDS = 5 * 60
+THROTTLE_MAX_SECONDS = 15 * 60
+
+LatchKey = tuple[str, str, str]
+
+_clock: Callable[[], float] = time.monotonic  # replaced in tests
 
 
-def _latched() -> NextcloudHTTPError | None:
-    if _auth_latch is None:
+@dataclass(frozen=True)
+class _Latch:
+    status: int
+    until: float | None  # monotonic deadline; None = until the process restarts
+
+
+_latches: dict[LatchKey, _Latch] = {}
+
+
+def latch_key(settings: Settings) -> LatchKey:
+    """Credentials identity for the latch. Holds only a hash of the password."""
+    parts = urlsplit(settings.base_url)
+    base = f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}"
+    digest = hashlib.sha256(settings.app_password.get_secret_value().encode()).hexdigest()
+    return (base, settings.username, digest)
+
+
+def _latch_message(status: int) -> str:
+    return AUTH_LATCHED_MESSAGE if status == 401 else THROTTLED_MESSAGE
+
+
+def _latched(key: LatchKey) -> NextcloudHTTPError | None:
+    latch = _latches.get(key)
+    if latch is None:
         return None
-    return NextcloudHTTPError(str(_auth_latch), _auth_latch.status)
+    if latch.until is not None and _clock() >= latch.until:
+        del _latches[key]
+        return None
+    return NextcloudHTTPError(_latch_message(latch.status), latch.status)
 
 
-def _set_latch(status: int) -> NextcloudHTTPError:
-    global _auth_latch
-    message = AUTH_LATCHED_MESSAGE if status == 401 else THROTTLED_MESSAGE
-    _auth_latch = NextcloudHTTPError(message, status)
-    logger.warning("Nextcloud answered %s; no further requests will be sent until restart", status)
-    return NextcloudHTTPError(message, status)
+def retry_after_seconds(value: str | None) -> float:
+    """Seconds to wait after a 429: Retry-After (delta or HTTP date), capped; else default."""
+    seconds: float | None = None
+    if value:
+        value = value.strip()
+        if value.isdigit():
+            seconds = float(value)
+        else:
+            try:
+                moment = parsedate_to_datetime(value)
+            except (TypeError, ValueError, IndexError):
+                moment = None
+            if moment is not None:
+                if moment.tzinfo is None:
+                    moment = moment.replace(tzinfo=UTC)
+                seconds = (moment - datetime.now(UTC)).total_seconds()
+    if seconds is None:
+        return float(THROTTLE_DEFAULT_SECONDS)
+    return float(min(max(seconds, 1.0), THROTTLE_MAX_SECONDS))
+
+
+def _set_latch(key: LatchKey, status: int, retry_after: str | None = None) -> NextcloudHTTPError:
+    if status == 429:
+        wait = retry_after_seconds(retry_after)
+        _latches[key] = _Latch(status, _clock() + wait)
+        logger.warning("Nextcloud answered 429; no requests with these credentials for %d s", wait)
+    else:
+        _latches[key] = _Latch(status, None)
+        logger.warning(
+            "Nextcloud answered %s; no requests with these credentials until restart", status
+        )
+    return NextcloudHTTPError(_latch_message(status), status)
 
 
 def reset_auth_latch() -> None:
-    """Clear the authentication latch (for tests; production clears it by restarting)."""
-    global _auth_latch
-    _auth_latch = None
+    """Clear every authentication latch (for tests; production clears 401 by restarting)."""
+    _latches.clear()
 
 
 class BackendPolicyError(Exception):
@@ -209,6 +272,7 @@ class NextcloudClient:
         self._transport = transport
         self.policy: PolicyFactory | None = load_backend_policy() if policy is _UNSET else policy
         self._verify = settings.tls_verify()
+        self.latch_key = latch_key(settings)
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._user_id: str | None = None
@@ -281,7 +345,7 @@ class NextcloudClient:
         (also a ToolError) when the body exceeds ``max_body`` bytes (default
         :data:`MAX_XML_BYTES`).
         """
-        latched = _latched()
+        latched = _latched(self.latch_key)
         if latched is not None:
             raise latched
         try:
@@ -311,7 +375,9 @@ class NextcloudClient:
                 )
             if response.status_code not in ok:
                 if response.status_code in (401, 429):
-                    raise _set_latch(response.status_code)
+                    raise _set_latch(
+                        self.latch_key, response.status_code, response.headers.get("retry-after")
+                    )
                 body = await self._read_capped(response, MAX_ERROR_BODY, tolerate=True)
                 detail = server_message(body) if response.status_code < 500 else None
                 raise NextcloudHTTPError(
