@@ -268,6 +268,14 @@ Claude Code / Claude Desktop config examples (stdio), gateway usage; `CHANGELOG.
 * No code: input validation (path, size, base64, UTF-8 content) and tool-level refusals
   of successfully read data (folder where a file is needed, binary file for a text tool,
   unknown calendar id, calendar without VTODO). `probe()` raises the same rendered errors.
+* Any other exception while processing an answer (not cancellation or other
+  BaseException) is caught at the tool boundary and in `probe()`, logged by type only,
+  and reported as `BACKEND_INVALID_RESPONSE: Nextcloud sent an answer that could not be
+  processed.` (no prefix outside code mode). At the point of failure: an unknown XML
+  encoding is invalid XML; an href that cannot be parsed is treated as outside the home
+  and skipped; an unrepresentable `getlastmodified` gives `modified: null`; the account
+  lookup rejects deeply nested JSON and user ids that are not non-empty valid UTF-8 of at
+  most 255 characters without control characters.
 * Without code mode messages are unchanged. Etags echoed in messages must be RFC 9110
   `etagc` ASCII of at most 256 characters, else `unknown`; bodies are never included.
 

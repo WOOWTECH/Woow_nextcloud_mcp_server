@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.1.5 - 2026-10-08
+
+### Fixed
+
+- Five malformed answers escaped as non-ToolError exceptions (masked by FastMCP as
+  "Error calling tool", without a code). Now, at the point of failure:
+  - an XML declaration with an unknown encoding (`x-bogus`, `rot13`) is invalid XML;
+  - an href that cannot be parsed (`http://[bad/x`) is skipped like an href outside the
+    home; the rest of the listing is returned;
+  - an unrepresentable `getlastmodified` (year 9999 with a negative offset) gives
+    `modified: null`;
+  - the account lookup rejects absurdly nested JSON and a user id that is not valid
+    UTF-8, contains surrogates or control characters, or exceeds 255 characters.
+- Belt: any other unexpected exception in a tool or in `probe()` becomes
+  `Nextcloud sent an answer that could not be processed.` (prefixed with
+  `BACKEND_INVALID_RESPONSE: ` in code mode); only its type is logged. Cancellation still
+  propagates.
+
 ## 0.1.4 - 2026-10-08
 
 ### Added

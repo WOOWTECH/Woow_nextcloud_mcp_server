@@ -288,6 +288,13 @@ error caused by a backend answer or a transport problem starts with a public cod
 | hook codes | When the hook module has `public_backend_error(exc)`, its return value is used for exceptions from the hook (e.g. `BACKEND_DESTINATION_DENIED`, `BACKEND_BUSY`, `BACKEND_STREAM_ERROR`). |
 | `ETAG_MISMATCH` | `delete_file_checked` refused locally because the file's current etag differs from `expected_etag`; nothing was sent. |
 
+Any other unexpected problem while processing an answer (for example an XML declaration
+naming an unknown encoding, absurdly nested JSON, or an invalid user id from the account
+lookup) is reported as `BACKEND_INVALID_RESPONSE: Nextcloud sent an answer that could not
+be processed.` (without the prefix outside code mode) instead of a generic tool error.
+Unparsable hrefs in a listing are skipped like hrefs outside the home, and unrepresentable
+`getlastmodified` dates become `modified: null`.
+
 Errors that never reached Nextcloud (invalid path, size, base64 or UTF-8 input) and
 refusals of the tools themselves (a folder where a file is needed, a binary file for a
 text tool, an unknown calendar id) carry no code. Without code mode the messages are

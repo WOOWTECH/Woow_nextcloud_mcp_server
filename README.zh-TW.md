@@ -257,6 +257,11 @@ Nextcloud 的暴力破解防護會依來源 IP 累計每一次登入失敗，之
 | 掛鉤代碼 | 掛鉤模組若提供 `public_backend_error(exc)`，來自掛鉤的例外就使用它的回傳值（例如 `BACKEND_DESTINATION_DENIED`、`BACKEND_BUSY`、`BACKEND_STREAM_ERROR`）。 |
 | `ETAG_MISMATCH` | `delete_file_checked` 在本地發現檔案目前的 etag 與 `expected_etag` 不同而拒絕；沒有送出任何請求。 |
 
+處理回應時遇到的其他意外問題（例如 XML 宣告了未知的編碼、巢狀層數離譜的 JSON，或帳號查詢
+回傳無效的使用者 id），會回報為 `BACKEND_INVALID_RESPONSE: Nextcloud sent an answer that could not be processed.`
+（未開啟 code mode 時不帶前綴），而不是籠統的工具錯誤。列表中無法解析的 href 會像主目錄以外的
+href 一樣被略過；無法表示的 `getlastmodified` 日期會變成 `modified: null`。
+
 沒有送到 Nextcloud 的錯誤（路徑、大小、base64 或 UTF-8 輸入無效），以及工具本身的拒絕
 （需要檔案卻是資料夾、文字工具遇到二進位檔、未知的行事曆 id）不帶代碼。未開啟 code mode 時，
 訊息與以前完全相同。訊息中顯示的 etag 必須是可列印的 ASCII（RFC 9110 `etagc`，最多 256 字元），
