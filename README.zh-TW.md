@@ -56,6 +56,7 @@
 | `NEXTCLOUD_MCP_VERIFY_TLS` | `true` | 是否驗證 TLS 憑證。設為 `false` 時啟動會記錄警告；建議改用 `CA_BUNDLE`。 |
 | `NEXTCLOUD_MCP_CA_BUNDLE` | 空白 | PEM 檔路徑，內含要信任的 CA 憑證，適用於私有 CA 的伺服器。 |
 | `NEXTCLOUD_MCP_ALLOWED_HOSTS` | 空白 | `http`／`sse` 傳輸額外接受的 `Host` 標頭值，以逗號分隔（可用 `*.example.com` 樣式）。詳見下文。 |
+| `NEXTCLOUD_MCP_ERROR_CODES` | `auto` | `true`／`false`：在後端錯誤前加上公開代碼（見「錯誤代碼」）。`auto` 表示使用 `backend_policy` 掛鉤時開啟。 |
 
 必填設定缺少或無效，或 `backend_policy`（見下文）無法使用時，伺服器會以狀態碼 2 結束，
 並輸出一行指出是哪個變數的訊息（絕不輸出其值）。`http://` 的根網址或 `VERIFY_TLS=false`
@@ -236,9 +237,39 @@ Nextcloud 的暴力破解防護會依來源 IP 累計每一次登入失敗，之
   `YYYY-MM-DD`；UTC 時間以 `Z` 結尾。重複規則（`RRULE`）**不會展開**：重複的待辦事項
   只列出一次，到期／開始時間為第一次發生的時間；只含變更過的單次發生（有
   `RECURRENCE-ID` 但沒有主項目）的物件會被略過。超過 1 MiB 的行事曆物件會被略過，並計入
-  `skipped_large_objects`。`TZID` 為 IANA 名稱、常見的 Windows／Outlook 名稱（例如
+  `skipped_large_objects`（巢狀超過 32 層的物件亦同）。`TZID` 為 IANA 名稱、常見的 Windows／Outlook 名稱（例如
   `W. Europe Standard Time`、`Taipei Standard Time`）或帶前綴的 IANA 路徑時會正確套用；
   其他 `TZID` 則保留為浮動時間（不帶時差）。
+
+## 錯誤代碼（code mode）
+
+需要把錯誤轉成自家介面的閘道，可以要求機器可讀的代碼。**使用 `backend_policy` 掛鉤時會自動
+開啟** code mode，也可以用 `NEXTCLOUD_MCP_ERROR_CODES=true|false` 強制開關（預設 `auto`）。
+開啟時，凡是由後端回應或傳輸問題造成的錯誤，都以公開代碼開頭，接著是 `: ` 與原本的英文訊息，
+例如 `BACKEND_HTTP_ERROR status=412: "notes.md" changed since it was read (current etag abc); read it again and retry.`
+
+| 代碼 | 時機 |
+|---|---|
+| `BACKEND_HTTP_ERROR status=N` | Nextcloud 回應 HTTP 狀態碼 N，包括已處理的情況：412（已存在／讀取後已變更）、404（不存在、上層資料夾不存在、沒有行事曆主目錄，以及 412 後查證檔案已不存在）、403、405、409、413、423、507、5xx、3xx 重新導向，以及鎖存的 401／429。 |
+| `BACKEND_INVALID_RESPONSE` | 格式錯誤、無法解碼或過大的回應：XML 無效、列表或文字檔過大、帳號查詢回應過大或不像 Nextcloud、列表路徑不在 WebDAV 資料夾內。 |
+| `BACKEND_TIMEOUT` | 請求逾時。 |
+| `BACKEND_UNAVAILABLE` | 其他傳輸失敗。 |
+| 掛鉤代碼 | 掛鉤模組若提供 `public_backend_error(exc)`，來自掛鉤的例外就使用它的回傳值（例如 `BACKEND_DESTINATION_DENIED`、`BACKEND_BUSY`、`BACKEND_STREAM_ERROR`）。 |
+| `ETAG_MISMATCH` | `delete_file_checked` 在本地發現檔案目前的 etag 與 `expected_etag` 不同而拒絕；沒有送出任何請求。 |
+
+沒有送到 Nextcloud 的錯誤（路徑、大小、base64 或 UTF-8 輸入無效），以及工具本身的拒絕
+（需要檔案卻是資料夾、文字工具遇到二進位檔、未知的行事曆 id）不帶代碼。未開啟 code mode 時，
+訊息與以前完全相同。訊息中顯示的 etag 必須是可列印的 ASCII（RFC 9110 `etagc`，最多 256 字元），
+否則顯示 `unknown`；絕不包含回應內容。
+
+## 已知限制
+
+* **ETag 解析度**：見「行為說明」；約一秒內對同一檔案的兩次寫入可能無法區分。
+* **閘道拒絕**：閘道的 `backend_policy` 可能拒絕某些路徑（例如名稱含 `%`）。`get_file_tree`
+  （depth 2–3）會略過這類子資料夾並設 `truncated=true`；未指定 `calendar` 的 `list_tasks`
+  會略過這類行事曆（以及無法讀取的 403／404），數量回報在 `skipped_calendars`。明確指定該檔案
+  或行事曆時仍會回報錯誤。
+* **巢狀過深的行事曆物件**：元件巢狀超過 32 層的物件會被略過，並計入 `skipped_large_objects`。
 
 ## 開發
 

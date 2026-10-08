@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.1.4 - 2026-10-08
+
+### Added
+
+- Code mode: with `NEXTCLOUD_MCP_ERROR_CODES` (`auto` = on when the `backend_policy` hook
+  is in use, or `true`/`false`), backend and transport errors start with a public code:
+  `BACKEND_HTTP_ERROR status=N`, `BACKEND_INVALID_RESPONSE`, `BACKEND_TIMEOUT`,
+  `BACKEND_UNAVAILABLE`, or the hook's own `public_backend_error(exc)` code;
+  `ETAG_MISMATCH` for `delete_file_checked`'s local etag check. Input validation errors
+  carry no code; without code mode messages are unchanged. `probe()` uses the same codes.
+- `list_tasks` without `calendar` skips calendars the gateway refuses (like 403/404) and
+  reports the count in the optional `skipped_calendars`.
+
+### Fixed
+
+- iCalendar parsing tracks open components with a counter (an END for a name that is not
+  open is O(1)); objects nested deeper than 32 levels are skipped and counted in
+  `skipped_large_objects`. A 40,000-level object no longer takes seconds.
+- Etags echoed in messages must be RFC 9110 `etagc` ASCII (<= 256 characters), else
+  `unknown`.
+- An exception while closing a response no longer replaces the result or the original
+  error.
+- Tests: the fake server can keep the ETag on a replace, exercising the "did not change
+  the etag" note.
+
 ## 0.1.3 - 2026-10-08
 
 ### Changed

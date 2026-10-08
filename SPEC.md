@@ -246,7 +246,39 @@ Claude Code / Claude Desktop config examples (stdio), gateway usage; `CHANGELOG.
 * `NextcloudClient.probe()` (one OCS `cloud/user` request, returns
   `{"ok": true, "user_id": ...}`) shares the latch and is not an MCP tool.
 
-## 12. Known limitations
+## 12. Error codes ("code mode", 0.1.4)
+
+* Setting `NEXTCLOUD_MCP_ERROR_CODES` = `auto` (default) | `true` | `false`; `auto` turns
+  code mode on when the `backend_policy` hook is in use.
+* In code mode every ToolError caused by a backend answer or transport problem reads
+  `<CODE>: <usual English text>`:
+  - `BACKEND_HTTP_ERROR status=N` for HTTP status answers, including handled ones (412
+    stale / already exists, 404 does not exist / missing parent / no calendar home, the
+    404 found after a 412, 403, 405, 409, 413, 423, 507, 5xx, 3xx redirects, latched 401
+    and 429);
+  - `BACKEND_INVALID_RESPONSE` for malformed, undecodable or oversized answers and
+    listings (invalid XML, too-large listing or text file, account lookup too large or
+    not Nextcloud-like, listing outside the files home);
+  - `BACKEND_TIMEOUT` for timeouts, `BACKEND_UNAVAILABLE` for other transport failures;
+  - for exceptions from the hook, the return value of the hook module's
+    `public_backend_error(exc)` when it exists and is a well-formed code (upper-case
+    word, optional ` status=NNN`), e.g. `BACKEND_DESTINATION_DENIED`, `BACKEND_BUSY`,
+    `BACKEND_STREAM_ERROR`;
+  - `ETAG_MISMATCH` when `delete_file_checked` refuses locally (no request sent).
+* No code: input validation (path, size, base64, UTF-8 content) and tool-level refusals
+  of successfully read data (folder where a file is needed, binary file for a text tool,
+  unknown calendar id, calendar without VTODO). `probe()` raises the same rendered errors.
+* Without code mode messages are unchanged. Etags echoed in messages must be RFC 9110
+  `etagc` ASCII of at most 256 characters, else `unknown`; bodies are never included.
+
+## 13. Known limitations
+
+* **Gateway refusals.** With depth 2-3, `get_file_tree` skips sub-folders the gateway
+  refuses and sets `truncated`. `list_tasks` without `calendar` skips calendars that are
+  refused (gateway) or unreadable (403/404) and reports their number in the optional
+  `skipped_calendars`; an explicitly requested calendar still raises the error.
+* **Nesting.** Calendar objects whose components nest deeper than 32 levels are skipped
+  as a whole and counted in `skipped_large_objects`; parsing is linear in the input.
 
 * **ETag resolution (observed on Nextcloud 35.0.1).** Nextcloud's ETags have about
   one-second resolution for writes to the same file. Two writes to one file within about

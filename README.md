@@ -59,6 +59,7 @@ environment wins):
 | `NEXTCLOUD_MCP_VERIFY_TLS` | `true` | TLS certificate verification. `false` logs a warning at start-up; prefer `CA_BUNDLE`. |
 | `NEXTCLOUD_MCP_CA_BUNDLE` | empty | Path to a PEM file with the CA certificate(s) to trust, for a server with a private CA. |
 | `NEXTCLOUD_MCP_ALLOWED_HOSTS` | empty | Extra `Host` header values the `http`/`sse` transports accept, comma separated (`*.example.com` patterns allowed). See below. |
+| `NEXTCLOUD_MCP_ERROR_CODES` | `auto` | `true`/`false`: prefix backend errors with public codes (see *Error codes*). `auto` = on when the `backend_policy` hook is in use. |
 
 If a required setting is missing or invalid, or `backend_policy` (see below) is unusable,
 the server exits with status 2 and a one-line message naming the variable (never its
@@ -265,9 +266,45 @@ the same message, without contacting Nextcloud.
   (`RRULE`) are **not expanded**: a recurring task appears once with the due/start of its
   first occurrence, and objects that contain only changed occurrences (`RECURRENCE-ID`
   without the master) are skipped. Calendar objects over 1 MiB are skipped and counted in
-  `skipped_large_objects`. `TZID`s that are IANA names, common Windows/Outlook names
+  `skipped_large_objects` (so are objects nested deeper than 32 levels). `TZID`s that are IANA names, common Windows/Outlook names
   (e.g. `W. Europe Standard Time`, `Taipei Standard Time`) or prefixed IANA paths are
   honoured; any other `TZID` leaves the time floating (no offset).
+
+## Error codes ("code mode")
+
+Gateways that translate errors for their own UI can ask for machine-readable codes.
+Code mode is **on automatically when the `backend_policy` hook is in use**, and can be
+forced with `NEXTCLOUD_MCP_ERROR_CODES=true|false` (default `auto`). In code mode, every
+error caused by a backend answer or a transport problem starts with a public code, then
+`: `, then the usual English text, e.g.
+`BACKEND_HTTP_ERROR status=412: "notes.md" changed since it was read (current etag abc); read it again and retry.`
+
+| Code | When |
+|---|---|
+| `BACKEND_HTTP_ERROR status=N` | Nextcloud answered with HTTP status N, including the handled ones: 412 (already exists / changed since it was read), 404 (does not exist, missing parent folder, no calendar home, and a 412 whose follow-up shows the file is gone), 403, 405, 409, 413, 423, 507, 5xx, 3xx redirects, and the latched 401 / 429. |
+| `BACKEND_INVALID_RESPONSE` | Malformed, undecodable or oversized answers: invalid XML, too-large listings or text files, an account lookup that is too large or not Nextcloud-like, listings outside the WebDAV folder. |
+| `BACKEND_TIMEOUT` | The request timed out. |
+| `BACKEND_UNAVAILABLE` | Any other transport failure. |
+| hook codes | When the hook module has `public_backend_error(exc)`, its return value is used for exceptions from the hook (e.g. `BACKEND_DESTINATION_DENIED`, `BACKEND_BUSY`, `BACKEND_STREAM_ERROR`). |
+| `ETAG_MISMATCH` | `delete_file_checked` refused locally because the file's current etag differs from `expected_etag`; nothing was sent. |
+
+Errors that never reached Nextcloud (invalid path, size, base64 or UTF-8 input) and
+refusals of the tools themselves (a folder where a file is needed, a binary file for a
+text tool, an unknown calendar id) carry no code. Without code mode the messages are
+exactly as before. Etags shown in messages must be printable ASCII (RFC 9110 `etagc`, at
+most 256 characters), otherwise `unknown` is shown; response bodies are never included.
+
+## Known limitations
+
+* **ETag resolution**: see the note under *Behaviour notes*; two writes to one file
+  within about a second may not be told apart.
+* **Gateway refusals**: a gateway's `backend_policy` may refuse some paths (for example
+  names containing `%`). `get_file_tree` (depth 2-3) skips such sub-folders and sets
+  `truncated=true`; `list_tasks` without `calendar` skips such calendars (and unreadable
+  ones, 403/404) and reports how many in `skipped_calendars`. Asking for that file or
+  calendar explicitly still returns the error.
+* **Deeply nested calendar objects**: objects whose components nest deeper than 32
+  levels are skipped and counted in `skipped_large_objects`.
 
 ## Development
 
