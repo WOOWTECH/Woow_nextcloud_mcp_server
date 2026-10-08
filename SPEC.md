@@ -231,7 +231,22 @@ Claude Code / Claude Desktop config examples (stdio), gateway usage; `CHANGELOG.
 (lint, tests on 3.11/3.13, licence check); `pyproject.toml` (hatchling) and
 `uv.lock`.
 
-## 11. Known limitations
+## 11. Authentication latch (added in 0.1.2, keyed in 0.1.3)
+
+* After a `401` or `429` answer (or a gateway exception carrying that status), no further
+  request is sent with the same credentials; tools and the probe fail at once with the
+  same ToolError (401: "Nextcloud rejected the username or app password. Fix the
+  credentials and restart the server; no further login attempts will be made until
+  then."; 429: the throttling message).
+* The latch is process-wide and keyed by (normalised base URL, username, SHA-256 of the
+  app password). The password is never stored or logged, nor is the key. Clients with
+  different credentials are not affected.
+* 401: latched until the process restarts. 429: expires after `Retry-After` (delta
+  seconds or HTTP date, at least 1 s, at most 15 min) or after 5 min without it.
+* `NextcloudClient.probe()` (one OCS `cloud/user` request, returns
+  `{"ok": true, "user_id": ...}`) shares the latch and is not an MCP tool.
+
+## 12. Known limitations
 
 * **ETag resolution (observed on Nextcloud 35.0.1).** Nextcloud's ETags have about
   one-second resolution for writes to the same file. Two writes to one file within about

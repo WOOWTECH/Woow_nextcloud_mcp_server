@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "woow-nextcloud-mcp-server"
-version = "0.1.2"
+version = "0.1.3"
 description = "A small MCP server that lets an MCP client work with one Nextcloud account (files, calendars, tasks) through an app password."
 readme = "README.md"
 license = "MIT"

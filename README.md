@@ -208,9 +208,19 @@ latch below, and is never listed in `tools/list`.
 Nextcloud's brute-force protection counts every failed login per client IP and then
 throttles (HTTP 429) or blocks that IP, including web logins and other clients behind the
 same address. To avoid this, the server **latches** the first `401` or `429` it gets:
-from then on every tool call and every probe fails at once with the same message, without
-contacting Nextcloud, until the server process is restarted (WOOW gateways restart it
-when the connection settings change).
+from then on every tool call and every probe with the same credentials fails at once with
+the same message, without contacting Nextcloud.
+
+* The latch is process-wide but **keyed by credentials**: the normalised base URL, the
+  username and a SHA-256 hash of the app password (the password itself is never stored or
+  logged). Other clients in the same process with the same credentials share it, so a
+  long-lived process never retries a known-bad login; a client built with different
+  credentials (for example after the operator saves the corrected app password) is not
+  affected.
+* A `401` stays latched for those credentials until the process restarts (WOOW gateways
+  restart the child when the connection settings change).
+* A `429` expires after the server's `Retry-After` (seconds or HTTP date, capped at
+  15 minutes) or, without one, after 5 minutes; then one request is tried again.
 
 * Stop the MCP server (or the gateway add-on) **before** revoking or rotating its app
   password, then update the password and start it again.

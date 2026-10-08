@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.1.3 - 2026-10-08
+
+### Changed
+
+- The authentication latch is keyed by credentials: (normalised base URL, username,
+  SHA-256 of the app password). It stays process-wide, so clients with the same
+  credentials share it and a long-lived process never retries a known-bad login, but a
+  client built with different credentials (for example after the operator saves the
+  corrected app password in an admin shell that keeps running) is no longer blocked.
+  Only the password hash is kept; the key is never logged.
+- A 429 latch expires after `Retry-After` (seconds or HTTP date, capped at 15 minutes),
+  or after 5 minutes when the server sent none. A 401 latch still lasts until restart.
+
 ## 0.1.2 - 2026-10-08
 
 ### Added
@@ -36,7 +49,7 @@ All notable changes to this project are documented here. The format follows
   Nextcloud (the ETag may stay the same, or the old ETag may still match), so `If-Match`
   protects against edits by others more than ~1 s apart. `update_text_file` and a
   replacing `upload_file` now add a `note` to the result when the returned etag equals
-  the `expected_etag` sent. Documented in README (en/zh-TW) and SPEC.md section 11.
+  the `expected_etag` sent. Documented in README (en/zh-TW) and SPEC.md ("Known limitations").
 
 ## 0.1.1 - 2026-10-08
 
