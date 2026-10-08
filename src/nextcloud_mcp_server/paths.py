@@ -72,7 +72,10 @@ def href_to_path(href: str, home_path: str) -> str | None:
 
     ``home_path`` is the (encoded) URL path of the files home, ending with ``/``.
     """
-    href_path = unquote(urlsplit(href).path)
+    try:
+        href_path = unquote(urlsplit(href).path)
+    except ValueError:  # e.g. "http://[bad/x": treated like an href outside the home
+        return None
     home = unquote(home_path)
     if not home.endswith("/"):
         home += "/"

@@ -222,6 +222,26 @@ def reset_auth_latch() -> None:
     _latches.clear()
 
 
+def _valid_user_id(value: object) -> bool:
+    """Non-empty str of at most 255 characters, valid UTF-8, no control characters."""
+    if not isinstance(value, str) or not value or len(value) > 255:
+        return False
+    try:
+        value.encode("utf-8")  # lone surrogates such as "\ud800" fail here
+    except UnicodeEncodeError:
+        return False
+    return not any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in value)
+
+
+UNPROCESSABLE_MESSAGE = "Nextcloud sent an answer that could not be processed."
+
+
+def unprocessable(exc: BaseException) -> ToolError:
+    """Last-resort error for an unexpected exception while handling an answer."""
+    logger.warning("could not process a Nextcloud answer: %s", type(exc).__name__)
+    return coded(UNPROCESSABLE_MESSAGE, INVALID_RESPONSE)
+
+
 class BackendPolicyError(Exception):
     """The gateway's ``backend_policy`` module exists but cannot be used."""
 
@@ -494,6 +514,8 @@ class NextcloudClient:
             user_id = await self._fetch_user_id()
         except ToolError as exc:
             raise self.render(exc) from None
+        except Exception as exc:  # CancelledError and other BaseException propagate
+            raise self.render(unprocessable(exc)) from None
         if self._user_id is None:
             self._user_id = user_id
         return {"ok": True, "user_id": user_id}
@@ -525,9 +547,10 @@ class NextcloudClient:
         try:
             data = json.loads(reply.body)
             user_id = data["ocs"]["data"]["id"]
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, RecursionError):
+            # RecursionError: absurdly nested JSON such as 200,000 "[" (within the cap)
             user_id = None
-        if not isinstance(user_id, str) or not user_id:
+        if not _valid_user_id(user_id):
             raise coded(
                 "The address in NEXTCLOUD_MCP_BASE_URL did not answer like a Nextcloud "
                 "server; check that it is the Nextcloud root URL.",

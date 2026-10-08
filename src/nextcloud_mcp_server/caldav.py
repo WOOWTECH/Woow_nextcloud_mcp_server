@@ -17,7 +17,10 @@ MAX_OBJECT_CHARS = 1024 * 1024  # calendar objects larger than this are skipped
 
 def href_last_segment(href: str) -> str:
     """Decoded last non-empty path segment of an href."""
-    path = urlsplit(href).path.rstrip("/")
+    try:
+        path = urlsplit(href).path.rstrip("/")
+    except ValueError:  # unparsable href: no id, so the collection is skipped
+        return ""
     return unquote(path.rsplit("/", 1)[-1])
 
 

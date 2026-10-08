@@ -20,7 +20,7 @@ from pydantic import Field
 from typing_extensions import TypedDict
 
 from .caldav import calendar_entry, is_done, sort_tasks, tasks_from_report
-from .client import BodyTooLarge, NextcloudClient
+from .client import BodyTooLarge, NextcloudClient, unprocessable
 from .errors import (
     ETAG_MISMATCH,
     INVALID_RESPONSE,
@@ -268,6 +268,8 @@ class NextcloudTools:
             return await call
         except ToolError as exc:
             raise self.nc.render(exc) from None
+        except Exception as exc:  # CancelledError and other BaseException propagate
+            raise self.nc.render(unprocessable(exc)) from None
 
     # -- helpers -------------------------------------------------------------------
 

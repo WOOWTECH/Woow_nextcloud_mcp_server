@@ -93,7 +93,8 @@ def parse_xml(body: bytes) -> Element:
     """Parse untrusted XML with defusedxml (no DTDs, no entities, no external refs)."""
     try:
         return SafeET.fromstring(body, forbid_dtd=True)
-    except (DefusedXmlException, SafeET.ParseError, ValueError) as exc:
+    except (DefusedXmlException, SafeET.ParseError, ValueError, LookupError) as exc:
+        # LookupError: an XML declaration naming an unknown encoding (e.g. "x-bogus")
         raise with_code(
             ToolError("Nextcloud sent an answer that is not valid WebDAV XML."), INVALID_RESPONSE
         ) from exc
@@ -161,7 +162,10 @@ def http_date_to_iso(value: str | None) -> str | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, ValueError):  # e.g. year 9999 with a negative offset
+        return None
 
 
 def file_entry(item: DavResponse, path: str) -> dict[str, Any]:
