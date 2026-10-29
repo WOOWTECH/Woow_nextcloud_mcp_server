@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import quote
 from xml.etree.ElementTree import Element
 
 from defusedxml import ElementTree as SafeET
@@ -137,8 +141,8 @@ def parse_multistatus(body: bytes) -> list[DavResponse]:
     return results
 
 
-def server_message(body: bytes) -> str | None:
-    """Extract ``<s:message>`` from a Sabre error body, truncated to 200 characters."""
+def server_message(body: bytes, *, credentials: tuple[str, ...] = ()) -> str | None:
+    """Extract Sabre diagnostics, masking known credentials before the 200-character cap."""
     if not body or len(body) > 65536:
         return None
     try:
@@ -148,6 +152,28 @@ def server_message(body: bytes) -> str | None:
     message = root.findtext(tag(SABRE, "message"))
     if not message:
         return None
+    # Exact configured values only: keep useful backend diagnostics and avoid changing
+    # successful file contents. Mask before folding/capping can split a credential.
+    variants: set[str] = set()
+    for credential in credentials:
+        if not credential:
+            continue
+        variants.update(
+            (
+                credential,
+                quote(credential, safe=""),
+                json.dumps(credential)[1:-1],
+                json.dumps(credential, ensure_ascii=False)[1:-1],
+            )
+        )
+        for encode in (base64.b64encode, base64.urlsafe_b64encode):
+            encoded = encode(credential.encode()).decode("ascii")
+            variants.update((encoded, encoded.rstrip("=")))
+    if variants:
+        # One pass, longest first: neither overlapping credentials nor the replacement
+        # marker may be partially masked by a subsequent replacement.
+        pattern = "|".join(re.escape(value) for value in sorted(variants, key=len, reverse=True))
+        message = re.sub(pattern, "[REDACTED]", message)
     message = " ".join(message.split())
     return message[:200] or None
 
