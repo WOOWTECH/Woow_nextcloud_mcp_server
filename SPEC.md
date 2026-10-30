@@ -112,7 +112,18 @@ bodies longer than 200 chars into a message. Mapping:
 | 423 | `"<p>" is locked (it may be open in Nextcloud Office or locked by another user); try again later or ask the owner to unlock it.` |
 | 413 / 507 | `Not enough storage or file too large for "<p>".` |
 | 5xx | `Nextcloud returned an error (<status>); try again later.` |
+| other 4xx | `Nextcloud refused the request for "<p>" (<status>)[: <detail>].` |
 | network/timeout | `Could not reach Nextcloud (<short reason>).` |
+
+`<detail>` is Nextcloud's own Sabre `<s:message>` (only for "other 4xx", never for 5xx),
+whitespace folded and cut to 200 characters. Before folding and cutting, every known form
+of the app password and of `username:password` is replaced by `[REDACTED]` (0.1.6,
+`errors.mask_credentials`): as is, URL-quoted (RFC 3986), JSON-escaped (ASCII or UTF-8
+output), standard and URL-safe base64 (RFC 4648) with and without padding, and each of
+these with `/` written as `\/` (RFC 8259; PHP's `json_encode` default). Every character
+of every occurrence is masked; overlapping occurrences become one marker; occurrences are
+found in one pass over the original text, so a marker is never masked again. Other text
+of the detail is kept; successful answers are never altered.
 
 Validation failures (bad path, oversize, not UTF-8, binary file to a text tool,
 wrong base64) are ToolErrors too, raised before any request.
@@ -208,7 +219,9 @@ tools.
   method/URL/headers/body; every error mapping row; ETag quoting; PROPFIND/REPORT
   XML parsing (namespaced, multistatus with 404 propstat); size caps; BOM; base64;
   gating (`READONLY`, `ALLOW_DELETE`, `DISABLED_TOOLS`); the `backend_policy` hook;
-  redirect refusal; no secret in any exception text or log record.
+  redirect refusal; no secret in any exception text or log record, also when Nextcloud
+  echoes the credentials in its error detail in any of the masked forms (through the
+  client and through MCP over Streamable HTTP, SSE and JSON answers).
 * MCP-level tests: start the FastMCP server in-process and call `tools/list` and
   `tools/call` through an MCP client, checking schemas have no top-level
   combinators and `additionalProperties: false`.
