@@ -57,6 +57,11 @@ def json_escaped(value: str, *, ascii_only: bool = True) -> str:
     return json.dumps(value, ensure_ascii=ascii_only)[1:-1]
 
 
+def solidus(text: str) -> str:
+    """``/`` written as ``\\/`` inside a JSON string, as PHP's json_encode() does by default."""
+    return text.replace("/", "\\/")
+
+
 FORMS: dict[str, Callable[[str], str]] = {
     # The seven forms of the PaaS and HA suites.
     "raw": lambda p: p,
@@ -68,10 +73,14 @@ FORMS: dict[str, Callable[[str], str]] = {
     "cut": lambda p: p[:16],
     # The other forms that are masked.
     "json-unicode": lambda p: json_escaped(p, ascii_only=False),
+    "json-solidus": lambda p: solidus(json_escaped(p)),
+    "json-unicode-solidus": lambda p: solidus(json_escaped(p, ascii_only=False)),
     "base64-unpadded": lambda p: b64(p, padded=False),
+    "base64-solidus": lambda p: solidus(b64(p)),
     "base64url": lambda p: b64(p, urlsafe=True),
     "base64url-unpadded": lambda p: b64(p, urlsafe=True, padded=False),
     "basic-url": lambda p: quote(f"{LOGIN}:{p}", safe=""),
+    "basic-solidus": lambda p: solidus(b64(f"{LOGIN}:{p}")),
     "basic-base64url-unpadded": lambda p: b64(f"{LOGIN}:{p}", urlsafe=True, padded=False),
 }
 

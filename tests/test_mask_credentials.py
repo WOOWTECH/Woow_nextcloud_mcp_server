@@ -28,6 +28,10 @@ def forms(value: str) -> dict[str, str]:
         encoded = encode(value.encode()).decode()
         found[name] = encoded
         found[f"{name}-unpadded"] = encoded.rstrip("=")
+    # Inside a JSON string "/" may be written "\/" (RFC 8259); PHP's json_encode() does so
+    # by default.
+    for name in ("json", "json-unicode", "base64", "base64-unpadded"):
+        found[f"{name}-solidus"] = found[name].replace("/", "\\/")
     return found
 
 
@@ -96,3 +100,12 @@ def test_overlapping_occurrences_leave_no_fragment() -> None:
     # Overlapping occurrences become one marker; touching ones stay two.
     assert mask_credentials("aaaa", ("aa",)) == "[REDACTED]"
     assert mask_credentials("aaaa", ("a",)) == "[REDACTED]" * 4
+
+
+def test_solidus_form_overlapping_another_form_leaves_no_fragment() -> None:
+    # The \/ form of the base64 ends with the "=" that starts the JSON form of the password.
+    password = "=ÿ_b"
+    encoded = base64.b64encode(password.encode()).decode().replace("/", "\\/")
+    escaped = json.dumps(password)[1:-1]
+    assert encoded.endswith("=") and escaped.startswith("=") and "\\/" in encoded
+    assert mask_credentials(f"x {encoded}{escaped[1:]} y", (password,)) == "x [REDACTED] y"

@@ -104,8 +104,9 @@ def credential_forms(credential: str) -> set[str]:
 
     As is; URL-quoted (RFC 3986, every reserved character escaped); JSON-escaped
     (RFC 8259) with ASCII-only and with UTF-8 output; standard and URL-safe base64
-    (RFC 4648) of its UTF-8 bytes, with and without padding. Empty for an empty
-    credential.
+    (RFC 4648) of its UTF-8 bytes, with and without padding; and each of these with ``/``
+    written as ``\\/``, as a JSON string may write it (PHP's ``json_encode`` does so by
+    default). Empty for an empty credential.
     """
     if not credential:
         return set()
@@ -118,6 +119,7 @@ def credential_forms(credential: str) -> set[str]:
     for encode in (base64.b64encode, base64.urlsafe_b64encode):
         encoded = encode(credential.encode()).decode("ascii")
         forms.update((encoded, encoded.rstrip("=")))
+    forms.update([form.replace("/", "\\/") for form in forms])
     return forms
 
 
