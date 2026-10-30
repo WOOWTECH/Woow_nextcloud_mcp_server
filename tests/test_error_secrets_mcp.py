@@ -208,6 +208,37 @@ async def test_echoed_credential_is_masked_in_tool_errors(
     assert all(request.headers["authorization"] == basic for request in fake.requests)
 
 
+OVERLAPS = {
+    # A periodic password echoed with one more period.
+    "periodic": ("FAKE-v016-" * 2, "FAKE-v016-" * 3),
+    # Base64 padding that is also the first character of the password.
+    "padding": ("=FAKE-v016-pass!", b64("=FAKE-v016-pass!") + "FAKE-v016-pass!"),
+}
+
+
+@pytest.mark.parametrize("json_response", [False, True], ids=["sse", "json"])
+@pytest.mark.parametrize("case", list(OVERLAPS))
+async def test_overlapping_echoes_leave_no_fragment(
+    make_settings, case: str, json_response: bool
+) -> None:
+    password, echo = OVERLAPS[case]
+    assert password in echo and echo != password
+    fake = FakeNextcloud()
+    detail = f"{DIAGNOSTIC}; credential echo {echo}; end diagnostic"
+
+    def fail(request: httpx.Request) -> httpx.Response | None:
+        if request.method != "PROPFIND":
+            return None
+        return httpx.Response(422, content=error_body("sabre", detail))
+
+    fake.override = fail
+    async with mcp_session(
+        make_settings(app_password=password), fake, json_response=json_response
+    ) as call:
+        text = await call("get_file_tree", {"path": "x"})
+    assert text == PREFIX + f"{DIAGNOSTIC}; credential echo [REDACTED]; end diagnostic."
+
+
 def test_forms_are_distinct() -> None:
     """Each case tests its own string: no two forms of the test password coincide."""
     values = [FORMS[form](PASSWORD) for form in FORMS if form not in ("folded", "cut")]

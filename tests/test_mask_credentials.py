@@ -82,3 +82,17 @@ def test_pair_masks_whole_basic_value_not_only_the_password() -> None:
     basic = base64.b64encode(PAIR.encode()).decode()
     text = f"Authorization: Basic {basic}; user {LOGIN}"
     assert mask_credentials(text, CREDENTIALS) == f"Authorization: Basic [REDACTED]; user {LOGIN}"
+
+
+def test_overlapping_occurrences_leave_no_fragment() -> None:
+    # A periodic password echoed with one more period.
+    assert mask_credentials("xabcabcabcx", ("abcabc",)) == "x[REDACTED]x"
+    # Base64 padding that is also the first character of the password.
+    password = "=FAKE-pass"
+    encoded = base64.b64encode(password.encode()).decode()
+    assert encoded.endswith("=")
+    text = f"echo {encoded}{password[1:]} end"
+    assert mask_credentials(text, (password,)) == "echo [REDACTED] end"
+    # Overlapping occurrences become one marker; touching ones stay two.
+    assert mask_credentials("aaaa", ("aa",)) == "[REDACTED]"
+    assert mask_credentials("aaaa", ("a",)) == "[REDACTED]" * 4

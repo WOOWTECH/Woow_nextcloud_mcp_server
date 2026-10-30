@@ -127,17 +127,38 @@ def mask_credentials(text: str, credentials: Iterable[str]) -> str:
     Only exact forms of the given values are replaced (:func:`credential_forms`), so
     ordinary diagnostics stay readable and all other text is left as it was. Mask the
     extracted detail before folding whitespace or cutting it to a length: either step
-    could turn a credential into a fragment that no longer matches. One pass, longest
-    form first: neither a shorter overlapping credential nor the marker emitted for an
-    earlier match is masked again.
+    could turn a credential into a fragment that no longer matches. Every character of
+    every occurrence is masked, also where occurrences overlap (they become one marker),
+    and all occurrences are found in the original text in one pass: no fragment of a
+    credential is left, and neither a shorter credential nor the marker is masked again.
     """
     forms: set[str] = set()
     for credential in credentials:
         forms.update(credential_forms(credential))
+    forms.discard("")
     if not forms:
         return text
     ordered = sorted(forms, key=lambda form: (-len(form), form))
-    return re.sub("|".join(map(re.escape, ordered)), lambda _match: REDACTED, text)
+    # The lookahead reports the longest form starting at every position, so occurrences
+    # that overlap (a periodic password, or base64 padding that is also the first
+    # character of another form) are all found; overlapping runs are merged.
+    finder = re.compile("(?=(" + "|".join(map(re.escape, ordered)) + "))")
+    parts: list[str] = []
+    copied = 0
+    run_start = run_end = -1
+    for match in finder.finditer(text):
+        start, end = match.start(), match.start() + len(match[1])
+        if start < run_end:
+            run_end = max(run_end, end)
+            continue
+        if run_end >= 0:
+            parts += (text[copied:run_start], REDACTED)
+            copied = run_end
+        run_start, run_end = start, end
+    if run_end < 0:
+        return text
+    parts += (text[copied:run_start], REDACTED, text[run_end:])
+    return "".join(parts)
 
 
 def stale_message(label: str, current_etag: str | None) -> str:
