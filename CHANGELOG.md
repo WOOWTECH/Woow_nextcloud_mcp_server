@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.1.6 - 2026-10-30
+
+### Security
+
+- Nextcloud's own error text (the Sabre `<s:message>` quoted in "Nextcloud refused the
+  request" errors) may echo the configured credentials. Every known form of the app
+  password and of `username:password` is now replaced by `[REDACTED]` before the text is
+  whitespace folded and cut to 200 characters, so neither step can leave a fragment: as
+  is, URL-quoted, JSON-escaped (ASCII or UTF-8 output), standard and URL-safe base64 with
+  and without padding, and each of these with `/` written as `\/` inside JSON (PHP's
+  `json_encode` default). Every character of every occurrence is masked: occurrences
+  that overlap (a periodic password echoed with one more period, base64 padding that is
+  also the first character of the password) become one marker instead of leaving the
+  tail of the second one; all occurrences are found in one pass over the original text,
+  so the `[REDACTED]` marker is never masked again. Ordinary diagnostic text, error
+  codes, the fixed 5xx messages, the authentication latch and successful file contents
+  are unchanged.
+
+### Added
+
+- `errors.mask_credentials(text, credentials)` and `errors.credential_forms(credential)`:
+  the one masking routine, also for gateways that relay more of Nextcloud's text.
+  `webdav.server_message(body, credentials=...)` uses it; `webdav.SERVER_MESSAGE_LIMIT`
+  (200) names the cap.
+
+### Tests
+
+- `tests/test_error_secrets_mcp.py`: the seven credential forms of the PaaS and HA add-on
+  suites (raw, Basic, URL-quoted, JSON-escaped, base64, a password with repeated
+  whitespace, one crossing the cap) and every other masked form, echoed in a 422 Sabre
+  message and read back through Streamable HTTP in SSE and JSON mode, with and without
+  code mode. 403, 500 and non-Sabre bodies stay without backend text; logs and the
+  `Authorization` header sent are checked. `tests/test_mask_credentials.py` tests the
+  routine itself.
+
 ## 0.1.5 - 2026-10-08
 
 ### Fixed

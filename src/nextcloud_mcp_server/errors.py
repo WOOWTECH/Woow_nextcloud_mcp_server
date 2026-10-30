@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import re
 import ssl
+from collections.abc import Iterable
 from typing import Literal
+from urllib.parse import quote
 
 import httpx
 from fastmcp.exceptions import ToolError
@@ -87,6 +91,76 @@ class NextcloudHTTPError(ToolError):
         super().__init__(message)
         self.status = status
         self.code = http_code(status)
+
+
+# Credential masking. The configured app password and ``username:password`` (the Basic
+# credentials) never reach a message, also not when Nextcloud echoes them, encoded or
+# not, in its own diagnostic text (see webdav.server_message).
+REDACTED = "[REDACTED]"
+
+
+def credential_forms(credential: str) -> set[str]:
+    """The representations of one credential that :func:`mask_credentials` replaces.
+
+    As is; URL-quoted (RFC 3986, every reserved character escaped); JSON-escaped
+    (RFC 8259) with ASCII-only and with UTF-8 output; standard and URL-safe base64
+    (RFC 4648) of its UTF-8 bytes, with and without padding; and each of these with ``/``
+    written as ``\\/``, as a JSON string may write it (PHP's ``json_encode`` does so by
+    default). Empty for an empty credential.
+    """
+    if not credential:
+        return set()
+    forms = {
+        credential,
+        quote(credential, safe=""),
+        json.dumps(credential)[1:-1],
+        json.dumps(credential, ensure_ascii=False)[1:-1],
+    }
+    for encode in (base64.b64encode, base64.urlsafe_b64encode):
+        encoded = encode(credential.encode()).decode("ascii")
+        forms.update((encoded, encoded.rstrip("=")))
+    forms.update([form.replace("/", "\\/") for form in forms])
+    return forms
+
+
+def mask_credentials(text: str, credentials: Iterable[str]) -> str:
+    """``text`` with every known form of each credential replaced by ``[REDACTED]``.
+
+    Only exact forms of the given values are replaced (:func:`credential_forms`), so
+    ordinary diagnostics stay readable and all other text is left as it was. Mask the
+    extracted detail before folding whitespace or cutting it to a length: either step
+    could turn a credential into a fragment that no longer matches. Every character of
+    every occurrence is masked, also where occurrences overlap (they become one marker),
+    and all occurrences are found in the original text in one pass: no fragment of a
+    credential is left, and neither a shorter credential nor the marker is masked again.
+    """
+    forms: set[str] = set()
+    for credential in credentials:
+        forms.update(credential_forms(credential))
+    forms.discard("")
+    if not forms:
+        return text
+    ordered = sorted(forms, key=lambda form: (-len(form), form))
+    # The lookahead reports the longest form starting at every position, so occurrences
+    # that overlap (a periodic password, or base64 padding that is also the first
+    # character of another form) are all found; overlapping runs are merged.
+    finder = re.compile("(?=(" + "|".join(map(re.escape, ordered)) + "))")
+    parts: list[str] = []
+    copied = 0
+    run_start = run_end = -1
+    for match in finder.finditer(text):
+        start, end = match.start(), match.start() + len(match[1])
+        if start < run_end:
+            run_end = max(run_end, end)
+            continue
+        if run_end >= 0:
+            parts += (text[copied:run_start], REDACTED)
+            copied = run_end
+        run_start, run_end = start, end
+    if run_end < 0:
+        return text
+    parts += (text[copied:run_start], REDACTED, text[run_end:])
+    return "".join(parts)
 
 
 def stale_message(label: str, current_etag: str | None) -> str:

@@ -252,7 +252,12 @@ the same message, without contacting Nextcloud.
   or that a gateway refuses (for example a folder name containing `%`); a refused folder
   also sets `truncated=true`, and the rest of the tree is still listed.
 * **Errors** are short English messages (`isError: true` in MCP) that never contain the
-  password, the `Authorization` header or long server bodies.
+  password, the `Authorization` header or long server bodies. A 4xx answer without a
+  message of its own in the error table (for example 400 or 422) may quote Nextcloud's
+  Sabre `<s:message>`, whitespace folded and cut to 200 characters; before that, every
+  known form of the app password and of `username:password` (as is, URL-quoted,
+  JSON-escaped, also with `\/`, standard or URL-safe base64 with or without padding) is
+  replaced by `[REDACTED]`.
 * **Paths** with control characters (C0, DEL, C1), bidirectional override/isolate
   characters, `.`/`..` segments, empty segments or backslashes are refused. Paths returned
   by the server pass the same checks; entries that fail are left out and never followed.
