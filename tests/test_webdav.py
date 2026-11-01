@@ -117,9 +117,12 @@ def test_xml_entities_and_dtds_are_refused() -> None:
 
 
 @pytest.mark.parametrize("shape", ["sabre", "ocs_json", "text"])
-def test_safe_server_diagnostic_recognizes_quota_without_reflecting_text(shape: str) -> None:
+@pytest.mark.parametrize("quota_text", ["quota exhausted", "Quota of the home folder is exhausted"])
+def test_safe_server_diagnostic_recognizes_quota_without_reflecting_text(
+    shape: str, quota_text: str
+) -> None:
     message = (
-        "FAKE quota exhausted on isolated backend; token=FAKE-unknown-secret; "
+        f"FAKE {quota_text} on isolated backend; token=FAKE-unknown-secret; "
         "host=nextcloud-db.internal.svc.cluster.local"
     )
     if shape == "sabre":
