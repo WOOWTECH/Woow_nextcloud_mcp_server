@@ -139,7 +139,10 @@ def parse_multistatus(body: bytes) -> list[DavResponse]:
     return results
 
 
-_QUOTA_EXHAUSTED = re.compile(r"\bquota\s+(?:is\s+)?(?:exhausted|exceeded)\b", re.I)
+_QUOTA_EXHAUSTED = re.compile(
+    r"\bquota\s+(?:(?:is\s+)?(?:exhausted|exceeded)|of\s+the\s+home\s+folder\s+is\s+exhausted)\b",
+    re.I,
+)
 
 
 def safe_server_diagnostic(body: bytes, content_type: str | None = None) -> str | None:
