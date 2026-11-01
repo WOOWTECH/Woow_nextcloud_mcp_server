@@ -166,11 +166,17 @@ async def test_echoed_credential_and_unknown_secrets_are_not_in_tool_errors(
     exposed = FORMS[form](password)
     # The folded and cut forms are what formatting would leave of the raw password.
     original = password if form in ("folded", "cut") else exposed
-    detail = (f"{DIAGNOSTIC}; credential echo {original}; token={UNKNOWN_TOKEN}; "
-              f"host={INTERNAL_HOST}; end diagnostic")
+    detail = (
+        f"{DIAGNOSTIC}; credential echo {original}; token={UNKNOWN_TOKEN}; "
+        f"host={INTERNAL_HOST}; end diagnostic"
+    )
     if form == "cut":
-        detail = (DIAGNOSTIC + "x" * (184 - len(DIAGNOSTIC)) + password +
-                  f"; token={UNKNOWN_TOKEN}; host={INTERNAL_HOST}")
+        detail = (
+            DIAGNOSTIC
+            + "x" * (184 - len(DIAGNOSTIC))
+            + password
+            + f"; token={UNKNOWN_TOKEN}; host={INTERNAL_HOST}"
+        )
     mode: dict[str, Any] = {"status": 422, "shape": "sabre", "detail": detail}
 
     fake = FakeNextcloud()
@@ -179,10 +185,13 @@ async def test_echoed_credential_and_unknown_secrets_are_not_in_tool_errors(
         if request.method != "PROPFIND":
             return None  # the account lookup succeeds
         body = error_body(mode["shape"], mode["detail"])
-        content_type = {"sabre": "application/xml", "ocs": "application/json",
-                        "json": "application/json", "text": "text/plain"}[mode["shape"]]
-        return httpx.Response(mode["status"], content=body,
-                              headers={"Content-Type": content_type})
+        content_type = {
+            "sabre": "application/xml",
+            "ocs": "application/json",
+            "json": "application/json",
+            "text": "text/plain",
+        }[mode["shape"]]
+        return httpx.Response(mode["status"], content=body, headers={"Content-Type": content_type})
 
     fake.override = fail
     settings = make_settings(app_password=password, error_codes=str(code_mode).lower())
@@ -194,10 +203,18 @@ async def test_echoed_credential_and_unknown_secrets_are_not_in_tool_errors(
     refused = 'Nextcloud refused the request for "x" (422).'
     calls = [
         ((422, "sabre", detail), coded(422, safe)),
-        ((403, "sabre", detail), coded(403, 'Permission denied for "x". '
-                                             'Backend diagnostic: storage quota exhausted.')),
-        ((500, "sabre", detail), coded(500, "Nextcloud returned an error (500); try again later. "
-                                             "Backend diagnostic: storage quota exhausted.")),
+        (
+            (403, "sabre", detail),
+            coded(403, 'Permission denied for "x". Backend diagnostic: storage quota exhausted.'),
+        ),
+        (
+            (500, "sabre", detail),
+            coded(
+                500,
+                "Nextcloud returned an error (500); try again later. "
+                "Backend diagnostic: storage quota exhausted.",
+            ),
+        ),
         ((422, "json", detail), coded(422, refused)),
         ((422, "ocs", detail), coded(422, safe)),
         ((422, "text", detail), coded(422, safe)),

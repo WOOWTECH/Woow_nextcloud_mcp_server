@@ -161,8 +161,10 @@ def safe_server_diagnostic(body: bytes, content_type: str | None = None) -> str 
                 message = root.findtext(tag(SABRE, "message"))
         except (DefusedXmlException, SafeET.ParseError, ValueError, LookupError):
             return None
-    elif media_type == "application/json" or media_type.endswith("+json") or (
-        not media_type and start == b"{"
+    elif (
+        media_type == "application/json"
+        or media_type.endswith("+json")
+        or (not media_type and start == b"{")
     ):
         try:
             payload = json.loads(body)

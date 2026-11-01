@@ -109,8 +109,7 @@ async def test_read_missing(hooked: NextcloudTools) -> None:
         (507, 'Not enough storage or file too large for "Docs/readme.md".'),
         (
             302,
-            "Nextcloud answered with a redirect; "
-            "set NEXTCLOUD_MCP_BASE_URL to the final address.",
+            "Nextcloud answered with a redirect; set NEXTCLOUD_MCP_BASE_URL to the final address.",
         ),
     ],
 )

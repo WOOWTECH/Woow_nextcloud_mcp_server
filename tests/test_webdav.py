@@ -118,11 +118,15 @@ def test_xml_entities_and_dtds_are_refused() -> None:
 
 @pytest.mark.parametrize("shape", ["sabre", "ocs_json", "text"])
 def test_safe_server_diagnostic_recognizes_quota_without_reflecting_text(shape: str) -> None:
-    message = "FAKE quota exhausted on isolated backend; token=FAKE-unknown-secret; " \
+    message = (
+        "FAKE quota exhausted on isolated backend; token=FAKE-unknown-secret; "
         "host=nextcloud-db.internal.svc.cluster.local"
+    )
     if shape == "sabre":
-        body = ('<d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">'
-                f'<s:message>{escape(message)}</s:message></d:error>').encode()
+        body = (
+            '<d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">'
+            f"<s:message>{escape(message)}</s:message></d:error>"
+        ).encode()
         content_type = "application/xml"
     elif shape == "ocs_json":
         body = json.dumps({"ocs": {"meta": {"message": message}}}).encode()
@@ -132,19 +136,25 @@ def test_safe_server_diagnostic_recognizes_quota_without_reflecting_text(shape: 
     assert safe_server_diagnostic(body, content_type) == "storage quota exhausted"
 
 
-@pytest.mark.parametrize(("body", "content_type"), [
-    (b"", "text/plain"),
-    (b"quota exhausted" * 7000, "text/plain"),
-    (b'<d:error xmlns:d="DAV:"/>', "application/xml"),
-    (b"<html>quota exhausted</html>", "text/html"),
-    (b'{"other": "quota exhausted"}', "application/json"),
-    (b'{"ocs": {"meta": {"message": 123}}}', "application/json"),
-    (b"<!DOCTYPE x [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><x>&xxe;</x>",
-     "application/xml"),
-    (b"\xffquota exhausted", "text/plain"),
-])
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        (b"", "text/plain"),
+        (b"quota exhausted" * 7000, "text/plain"),
+        (b'<d:error xmlns:d="DAV:"/>', "application/xml"),
+        (b"<html>quota exhausted</html>", "text/html"),
+        (b'{"other": "quota exhausted"}', "application/json"),
+        (b'{"ocs": {"meta": {"message": 123}}}', "application/json"),
+        (
+            b"<!DOCTYPE x [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><x>&xxe;</x>",
+            "application/xml",
+        ),
+        (b"\xffquota exhausted", "text/plain"),
+    ],
+)
 def test_safe_server_diagnostic_rejects_unrecognized_body(
-    body: bytes, content_type: str,
+    body: bytes,
+    content_type: str,
 ) -> None:
     assert safe_server_diagnostic(body, content_type) is None
 

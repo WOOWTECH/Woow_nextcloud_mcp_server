@@ -116,8 +116,7 @@ async def test_redirect_is_refused(settings: Settings, status: int) -> None:
     with pytest.raises(ToolError) as info:
         await nc.user_id()
     assert str(info.value) == (
-        "Nextcloud answered with a redirect; set NEXTCLOUD_MCP_BASE_URL "
-        "to the final address."
+        "Nextcloud answered with a redirect; set NEXTCLOUD_MCP_BASE_URL to the final address."
     )
 
 
