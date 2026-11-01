@@ -1,4 +1,4 @@
-"""Known credentials are masked before Sabre diagnostics are folded or capped."""
+"""Backend diagnostics never reflect known or unknown credentials."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import pytest
 from fake_nextcloud import BASE_URL, LOGIN
 from nextcloud_mcp_server.client import NextcloudClient
 from nextcloud_mcp_server.errors import NextcloudHTTPError
-from nextcloud_mcp_server.webdav import server_message
+from nextcloud_mcp_server.webdav import safe_server_diagnostic
 
 PASSWORD = 'FAKE-paas-pass/+"quoted-4917ÿ'
 PREFIX = 'Nextcloud refused the request for "x" (422): '
@@ -56,26 +56,29 @@ async def test_422_masks_known_credentials(make_settings, with_username, form) -
         "base64url": base64.urlsafe_b64encode(credential.encode()).decode(),
         "unpadded": base64.urlsafe_b64encode(credential.encode()).decode().rstrip("="),
     }
-    text = await response_text(make_settings, PASSWORD, f"storage refused; {variants[form]}; retry")
-    assert text == PREFIX + "storage refused; [REDACTED]; retry."
+    text = await response_text(make_settings, PASSWORD, f"quota exhausted; {variants[form]}; retry")
+    assert text == PREFIX + "storage quota exhausted."
+    assert credential not in text and variants[form] not in text
 
 
 @pytest.mark.parametrize("case", ["whitespace", "cut"])
-async def test_mask_precedes_whitespace_and_200_character_cap(make_settings, case) -> None:
+async def test_long_or_folded_secret_is_not_reflected(make_settings, case) -> None:
     password = "FAKE-paas-pass  spaced-4917" if case == "whitespace" else PASSWORD
-    prefix = "storage refused; " if case == "whitespace" else "x" * 184
+    prefix = "quota exhausted; " if case == "whitespace" else "quota exhausted; " + "x" * 184
     text = await response_text(make_settings, password, prefix + password + "; retry")
-    assert text == PREFIX + (prefix + "[REDACTED]; retry")[:200] + "."
+    assert text == PREFIX + "storage quota exhausted."
     assert password[:16] not in text
 
 
-async def test_existing_500_and_benign_detail_contract(make_settings) -> None:
+async def test_5xx_and_unrecognized_detail_contract(make_settings) -> None:
     assert await response_text(make_settings, PASSWORD, PASSWORD, 500) == (
         "Nextcloud returned an error (500); try again later."
     )
-    assert await response_text(make_settings, PASSWORD, "SAFE \n " * 60) == (
-        PREFIX + ("SAFE " * 60).strip()[:200] + "."
+    assert await response_text(make_settings, PASSWORD, "quota exhausted", 500) == (
+        "Nextcloud returned an error (500); try again later. "
+        "Backend diagnostic: storage quota exhausted."
     )
+    assert await response_text(make_settings, PASSWORD, "SAFE \n " * 60) == PREFIX[:-2] + "."
 
 
 async def test_successful_file_content_is_not_masked(make_settings) -> None:
@@ -91,10 +94,7 @@ async def test_successful_file_content_is_not_masked(make_settings) -> None:
         await client.aclose()
 
 
-def test_optional_credentials_and_single_pass_replacement() -> None:
-    assert server_message(sabre("normal diagnostic")) == "normal diagnostic"
-    assert server_message(sabre("normal diagnostic"), credentials=("",)) == "normal diagnostic"
-    assert server_message(sabre("long-token token"), credentials=("token", "long-token")) == (
-        "[REDACTED] [REDACTED]"
-    )
-    assert server_message(sabre("REDACTED"), credentials=("REDACTED",)) == "[REDACTED]"
+def test_unknown_backend_text_is_not_exposed() -> None:
+    assert safe_server_diagnostic(sabre("normal diagnostic")) is None
+    assert safe_server_diagnostic(sabre("long-token token")) is None
+    assert safe_server_diagnostic(sabre("REDACTED")) is None

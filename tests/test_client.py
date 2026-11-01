@@ -20,7 +20,6 @@ from nextcloud_mcp_server.client import (
     BackendPolicyError,
     BodyTooLarge,
     NextcloudClient,
-    _redirect_target,
     load_backend_policy,
 )
 from nextcloud_mcp_server.errors import NextcloudHTTPError, network_message
@@ -117,15 +116,9 @@ async def test_redirect_is_refused(settings: Settings, status: int) -> None:
     with pytest.raises(ToolError) as info:
         await nc.user_id()
     assert str(info.value) == (
-        "Nextcloud answered with a redirect to https://login.example.com:8443/nc/index.php/login; "
-        "set NEXTCLOUD_MCP_BASE_URL to the final address."
+        "Nextcloud answered with a redirect; set NEXTCLOUD_MCP_BASE_URL "
+        "to the final address."
     )
-
-
-def test_redirect_target_variants() -> None:
-    assert _redirect_target("https://a.example/x/y", "/login") == "https://a.example/login"
-    assert _redirect_target("https://a.example/x/y", None) == "an unknown address"
-    assert _redirect_target("https://a.example/x/y", "http://[bad") == "an unknown address"
 
 
 @pytest.mark.parametrize(
@@ -198,7 +191,7 @@ async def test_error_body_is_capped_and_message_extracted(settings: Settings) ->
     nc = _client(settings, lambda r: httpx.Response(400, content=body))
     with pytest.raises(NextcloudHTTPError) as info:
         await nc.send("GET", BASE_URL + "/x", label="x", op="read")
-    assert str(info.value) == 'Nextcloud refused the request for "x" (400): Bad chunk.'
+    assert str(info.value) == 'Nextcloud refused the request for "x" (400).'
     assert info.value.status == 400
 
     huge = _client(settings, lambda r: httpx.Response(400, content=b"y" * 200_000))

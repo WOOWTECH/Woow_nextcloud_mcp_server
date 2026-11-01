@@ -69,8 +69,11 @@ def test_status_message(status: int, op: str, expected: str) -> None:
 
 
 def test_status_message_detail_and_etag() -> None:
-    assert status_message(400, P, "read", detail="Bad") == (
-        f'Nextcloud refused the request for "{P}" (400): Bad.'
+    assert status_message(400, P, "read", detail="storage quota exhausted") == (
+        f'Nextcloud refused the request for "{P}" (400): storage quota exhausted.'
+    )
+    assert status_message(400, P, "read", detail="secret.internal") == (
+        f'Nextcloud refused the request for "{P}" (400).'
     )
     assert "current etag abc" in status_message(412, P, "update", current_etag="abc")
     assert stale_message(P, "abc") == (

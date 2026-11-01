@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 from fastmcp.exceptions import ToolError
@@ -44,7 +44,7 @@ from .errors import (
 )
 from .paths import encode_path
 from .settings import Settings
-from .webdav import server_message
+from .webdav import safe_server_diagnostic
 
 logger = logging.getLogger("nextcloud_mcp_server")
 
@@ -255,18 +255,6 @@ class Reply:
     body: bytes
 
 
-def _redirect_target(request_url: str, location: str | None) -> str:
-    if not location:
-        return "an unknown address"
-    try:
-        target = urlsplit(urljoin(request_url, location))
-        host = target.hostname or ""
-        port = f":{target.port}" if target.port else ""
-    except ValueError:
-        return "an unknown address"
-    return f"{target.scheme}://{host}{port}{target.path}"
-
-
 def load_backend_policy() -> PolicyFactory | None:
     """Return ``backend_policy.async_client`` when a gateway ships that module.
 
@@ -423,10 +411,9 @@ class NextcloudClient:
         try:
             logger.debug("%s -> %s", method, response.status_code)
             if 300 <= response.status_code < 400:
-                target = _redirect_target(str(request.url), response.headers.get("location"))
                 raise coded(
-                    f"Nextcloud answered with a redirect to {target}; "
-                    "set NEXTCLOUD_MCP_BASE_URL to the final address.",
+                    "Nextcloud answered with a redirect; set NEXTCLOUD_MCP_BASE_URL "
+                    "to the final address.",
                     http_code(response.status_code),
                 )
             if response.status_code not in ok:
@@ -435,12 +422,7 @@ class NextcloudClient:
                         self.latch_key, response.status_code, response.headers.get("retry-after")
                     )
                 body = await self._read_capped(response, MAX_ERROR_BODY, tolerate=True)
-                detail = None
-                if response.status_code < 500:
-                    password = self.settings.app_password.get_secret_value()
-                    detail = server_message(
-                        body, credentials=(password, f"{self.settings.username}:{password}")
-                    )
+                detail = safe_server_diagnostic(body, response.headers.get("content-type"))
                 raise NextcloudHTTPError(
                     status_message(response.status_code, label, op, detail=detail),
                     response.status_code,
