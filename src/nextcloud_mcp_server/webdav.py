@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import UTC
 from email.utils import parsedate_to_datetime
@@ -13,7 +14,7 @@ from defusedxml import ElementTree as SafeET
 from defusedxml.common import DefusedXmlException
 from fastmcp.exceptions import ToolError
 
-from .errors import INVALID_RESPONSE, mask_credentials, with_code
+from .errors import INVALID_RESPONSE, SAFE_QUOTA_DIAGNOSTIC, with_code
 from .paths import normalize_etag
 
 DAV = "DAV:"
@@ -138,27 +139,51 @@ def parse_multistatus(body: bytes) -> list[DavResponse]:
     return results
 
 
-SERVER_MESSAGE_LIMIT = 200  # characters of Nextcloud's own text in a message
+_QUOTA_EXHAUSTED = re.compile(r"\bquota\s+(?:is\s+)?(?:exhausted|exceeded)\b", re.I)
 
 
-def server_message(body: bytes, *, credentials: Iterable[str] = ()) -> str | None:
-    """Nextcloud's ``<s:message>`` from a Sabre error body, for an error message.
+def safe_server_diagnostic(body: bytes, content_type: str | None = None) -> str | None:
+    """Return a fixed diagnostic category, never untrusted backend text.
 
-    Every known form of ``credentials`` is masked first (errors.mask_credentials); only
-    then is whitespace folded and the text cut to :data:`SERVER_MESSAGE_LIMIT` characters,
-    so neither step can turn a credential into a fragment that no longer matches.
+    Error bodies may contain credentials that are not known to this process, including
+    tokens and internal addresses. No pattern-based redactor can guarantee their removal.
+    Only a bounded, recognized condition is allowed into a public tool error.
     """
     if not body or len(body) > 65536:
         return None
-    try:
-        root = SafeET.fromstring(body, forbid_dtd=True)
-    except Exception:
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    start = body.lstrip()[:1]
+    message: str | None = None
+    if media_type in ("application/xml", "text/xml") or (not media_type and start == b"<"):
+        try:
+            root = SafeET.fromstring(body, forbid_dtd=True)
+            if root.tag == tag(DAV, "error"):
+                message = root.findtext(tag(SABRE, "message"))
+        except (DefusedXmlException, SafeET.ParseError, ValueError, LookupError):
+            return None
+    elif (
+        media_type == "application/json"
+        or media_type.endswith("+json")
+        or (not media_type and start == b"{")
+    ):
+        try:
+            payload = json.loads(body)
+            if isinstance(payload, dict):
+                ocs = payload.get("ocs")
+                if isinstance(ocs, dict):
+                    meta = ocs.get("meta")
+                    if isinstance(meta, dict) and isinstance(meta.get("message"), str):
+                        message = meta["message"]
+        except (UnicodeError, ValueError):
+            return None
+    elif media_type == "text/plain" or (not media_type and start not in (b"<", b"{")):
+        try:
+            message = body.decode("utf-8")
+        except UnicodeError:
+            return None
+    if not isinstance(message, str):
         return None
-    message = root.findtext(tag(SABRE, "message"))
-    if not message:
-        return None
-    message = " ".join(mask_credentials(message, credentials).split())
-    return message[:SERVER_MESSAGE_LIMIT] or None
+    return SAFE_QUOTA_DIAGNOSTIC if _QUOTA_EXHAUSTED.search(message) else None
 
 
 def http_date_to_iso(value: str | None) -> str | None:

@@ -1,14 +1,13 @@
-"""Echoed credentials in Nextcloud's error detail, through the real server over HTTP.
+"""Fixed backend diagnostics through the real server over HTTP.
 
 The PaaS (woow-mcp-server) and HA add-on suites send seven credential forms through their
 real child processes: raw, Basic (base64 of ``user:password``), URL-quoted, JSON-escaped,
 base64, a password with repeated whitespace (``folded``) and one that crosses the
-length cap (``cut``). Here the same forms, plus every other form the masking knows, are
-echoed by an in-memory Nextcloud in a 422 Sabre ``<s:message>`` and read back through
+length cap (``cut``). Here the same forms, plus every other known form, are
+echoed by an in-memory Nextcloud in a 422 Sabre ``<s:message>`` and checked through
 the Streamable HTTP transport in both answer modes (SSE and JSON), with and without code
-mode. The other statuses and body shapes of the HA suite (403, 500; JSON, OCS and plain
-text bodies) are reported by this server without the backend's text, which is checked
-too. The cap is 200 characters here (the HA add-on raises it to 1000).
+mode. Other statuses and body shapes also return only a fixed category, never free-form
+backend text or unknown secrets.
 """
 
 from __future__ import annotations
@@ -32,7 +31,9 @@ from nextcloud_mcp_server.settings import Settings
 
 PASSWORD = 'FAKE-v016-pass/+"quoted-4917ÿ~'
 SPACED = "FAKE-v016-pass  spaced-4917ÿ~"
-DIAGNOSTIC = "FAKE storage temporarily unavailable"
+DIAGNOSTIC = "FAKE quota exhausted on isolated backend"
+UNKNOWN_TOKEN = "FAKE-unknown-backend-token-20261101"
+INTERNAL_HOST = "nextcloud-db.internal.svc.cluster.local"
 PREFIX = 'Nextcloud refused the request for "x" (422): '
 MCP_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 INITIALIZE = {
@@ -152,7 +153,7 @@ async def mcp_session(
 @pytest.mark.parametrize("code_mode", [False, True], ids=["plain", "code-mode"])
 @pytest.mark.parametrize("json_response", [False, True], ids=["sse", "json"])
 @pytest.mark.parametrize("form", list(FORMS))
-async def test_echoed_credential_is_masked_in_tool_errors(
+async def test_echoed_credential_and_unknown_secrets_are_not_in_tool_errors(
     make_settings,
     caplog: pytest.LogCaptureFixture,
     capfd: pytest.CaptureFixture[str],
@@ -165,9 +166,17 @@ async def test_echoed_credential_is_masked_in_tool_errors(
     exposed = FORMS[form](password)
     # The folded and cut forms are what formatting would leave of the raw password.
     original = password if form in ("folded", "cut") else exposed
-    detail = f"{DIAGNOSTIC}; credential echo {original}; end diagnostic"
+    detail = (
+        f"{DIAGNOSTIC}; credential echo {original}; token={UNKNOWN_TOKEN}; "
+        f"host={INTERNAL_HOST}; end diagnostic"
+    )
     if form == "cut":
-        detail = DIAGNOSTIC + "x" * (184 - len(DIAGNOSTIC)) + password
+        detail = (
+            DIAGNOSTIC
+            + "x" * (184 - len(DIAGNOSTIC))
+            + password
+            + f"; token={UNKNOWN_TOKEN}; host={INTERNAL_HOST}"
+        )
     mode: dict[str, Any] = {"status": 422, "shape": "sabre", "detail": detail}
 
     fake = FakeNextcloud()
@@ -176,9 +185,13 @@ async def test_echoed_credential_is_masked_in_tool_errors(
         if request.method != "PROPFIND":
             return None  # the account lookup succeeds
         body = error_body(mode["shape"], mode["detail"])
-        return httpx.Response(
-            mode["status"], content=body, headers={"Content-Type": "application/xml"}
-        )
+        content_type = {
+            "sabre": "application/xml",
+            "ocs": "application/json",
+            "json": "application/json",
+            "text": "text/plain",
+        }[mode["shape"]]
+        return httpx.Response(mode["status"], content=body, headers={"Content-Type": content_type})
 
     fake.override = fail
     settings = make_settings(app_password=password, error_codes=str(code_mode).lower())
@@ -186,16 +199,26 @@ async def test_echoed_credential_is_masked_in_tool_errors(
     def coded(status: int, text: str) -> str:
         return f"BACKEND_HTTP_ERROR status={status}: {text}" if code_mode else text
 
-    masked = " ".join(detail.replace(original, "[REDACTED]").split())[:200]
+    safe = PREFIX + "storage quota exhausted."
     refused = 'Nextcloud refused the request for "x" (422).'
     calls = [
-        ((422, "sabre", detail), coded(422, PREFIX + masked + ".")),
-        ((403, "sabre", detail), coded(403, 'Permission denied for "x".')),
-        ((500, "sabre", detail), coded(500, "Nextcloud returned an error (500); try again later.")),
+        ((422, "sabre", detail), coded(422, safe)),
+        (
+            (403, "sabre", detail),
+            coded(403, 'Permission denied for "x". Backend diagnostic: storage quota exhausted.'),
+        ),
+        (
+            (500, "sabre", detail),
+            coded(
+                500,
+                "Nextcloud returned an error (500); try again later. "
+                "Backend diagnostic: storage quota exhausted.",
+            ),
+        ),
         ((422, "json", detail), coded(422, refused)),
-        ((422, "ocs", detail), coded(422, refused)),
-        ((422, "text", detail), coded(422, refused)),
-        ((422, "sabre", "SAFE \n " * 60), coded(422, PREFIX + ("SAFE " * 60).strip()[:200] + ".")),
+        ((422, "ocs", detail), coded(422, safe)),
+        ((422, "text", detail), coded(422, safe)),
+        ((422, "sabre", "SAFE \n " * 60), coded(422, refused)),
     ]
     texts = []
     async with mcp_session(settings, fake, json_response=json_response) as call:
@@ -204,13 +227,13 @@ async def test_echoed_credential_is_masked_in_tool_errors(
             texts.append(await call("get_file_tree", {"path": "x"}))
 
     assert texts == [want for _, want in calls]
-    assert DIAGNOSTIC in texts[0]
-    if form != "cut":
-        assert "end diagnostic" in texts[0]
+    assert DIAGNOSTIC not in texts[0]
     captured = capfd.readouterr()
     output = "\n".join([*texts, caplog.text, captured.out, captured.err])
     assert password not in output
     assert exposed not in output
+    assert UNKNOWN_TOKEN not in output
+    assert INTERNAL_HOST not in output
     assert fake.requests
     assert {request.method for request in fake.requests} <= {"GET", "PROPFIND"}
     basic = "Basic " + b64(f"{LOGIN}:{password}")
@@ -245,7 +268,8 @@ async def test_overlapping_echoes_leave_no_fragment(
         make_settings(app_password=password), fake, json_response=json_response
     ) as call:
         text = await call("get_file_tree", {"path": "x"})
-    assert text == PREFIX + f"{DIAGNOSTIC}; credential echo [REDACTED]; end diagnostic."
+    assert text == PREFIX + "storage quota exhausted."
+    assert password not in text and echo not in text
 
 
 def test_forms_are_distinct() -> None:

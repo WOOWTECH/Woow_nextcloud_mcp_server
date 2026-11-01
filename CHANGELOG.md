@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Security
+
+- Backend error text is no longer echoed into MCP tool errors. Sabre XML, OCS JSON, and
+  UTF-8 plain text can produce the fixed `storage quota exhausted` category on 4xx and
+  5xx responses. Unknown messages use the existing status-only wording, so unknown
+  tokens, passwords, and internal hosts cannot escape through free-form diagnostics.
+- Redirect errors omit the backend-supplied `Location` address.
+- Tool names and input/output schemas remain unchanged.
+
 ## 0.1.6 - 2026-10-30
 
 ### Security

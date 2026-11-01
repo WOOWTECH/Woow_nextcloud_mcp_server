@@ -224,11 +224,9 @@ Nextcloud 的暴力破解防護會依來源 IP 累計每一次登入失敗，之
 * **重新導向**一律不跟隨：請把 `NEXTCLOUD_MCP_BASE_URL` 設成最終網址。
 * **樹狀列表**（`depth` 2–3）會略過已消失、無法讀取（403／404）或被閘道拒絕（例如名稱含
   `%` 的資料夾）的子資料夾；被拒絕時也會設 `truncated=true`，其餘部分照常列出。
-* **錯誤**是簡短的英文訊息（MCP 中 `isError: true`），絕不包含密碼、`Authorization`
-  標頭或冗長的伺服器回應內容。錯誤表中沒有專屬訊息的 4xx 回應（例如 400、422）可能附上
-  Nextcloud 自己的 Sabre `<s:message>`，空白摺疊後截到 200 字；在此之前，應用程式密碼與
-  `username:password` 的所有已知形式（原樣、URL-quoted、JSON 跳脫（含 `\/` 寫法）、標準或
-  URL-safe 的 base64，有無 padding）都會換成 `[REDACTED]`。
+* **錯誤**是簡短的英文訊息（MCP 中 `isError: true`）。Sabre XML、OCS JSON 與純文字
+  錯誤內容若顯示儲存配額已耗盡，只會回傳固定的 `storage quota exhausted`；其餘後端自由
+  格式文字不回傳，避免未知 token、密碼或內部主機名外洩。重新導向錯誤不顯示 `Location`。
 * **路徑**含控制字元（C0、DEL、C1）、雙向文字覆寫／隔離字元、`.`／`..` 區段、空區段或
   反斜線時會被拒絕。伺服器回傳的路徑也經過同樣檢查，不合格的項目會被略過且絕不會再去
   存取。若清單中沒有任何路徑位於該帳號的 WebDAV 資料夾下（反向代理或 `overwritewebroot`

@@ -68,7 +68,7 @@ but environment wins. Unknown variables are ignored.
   `async_client(*, base_url, **kwargs)`, build the client with it (WOOW's HA gateway
   ships this module to pin DNS and forbid redirects); otherwise build a plain
   `httpx.AsyncClient`. Same keyword arguments either way.
-* A 3xx answer is an error: `Nextcloud answered with a redirect to <Location>; set NEXTCLOUD_MCP_BASE_URL to the final address.` (include only scheme+host+path of Location).
+* A 3xx answer is an error: `Nextcloud answered with a redirect; set NEXTCLOUD_MCP_BASE_URL to the final address.` Never include `Location` in a public error.
 * Never log request headers or bodies.
 
 ## 5. Account and path resolution
@@ -115,15 +115,14 @@ bodies longer than 200 chars into a message. Mapping:
 | other 4xx | `Nextcloud refused the request for "<p>" (<status>)[: <detail>].` |
 | network/timeout | `Could not reach Nextcloud (<short reason>).` |
 
-`<detail>` is Nextcloud's own Sabre `<s:message>` (only for "other 4xx", never for 5xx),
-whitespace folded and cut to 200 characters. Before folding and cutting, every known form
-of the app password and of `username:password` is replaced by `[REDACTED]` (0.1.6,
-`errors.mask_credentials`): as is, URL-quoted (RFC 3986), JSON-escaped (ASCII or UTF-8
-output), standard and URL-safe base64 (RFC 4648) with and without padding, and each of
-these with `/` written as `\/` (RFC 8259; PHP's `json_encode` default). Every character
-of every occurrence is masked; overlapping occurrences become one marker; occurrences are
-found in one pass over the original text, so a marker is never masked again. Other text
-of the detail is kept; successful answers are never altered.
+The fixed backend diagnostic may be appended after the 403 or 5xx status message.
+
+Backend error bodies are parsed as Sabre XML, OCS JSON, or UTF-8 plain text, but their
+free-form content is never returned to the MCP caller. A recognized `quota exhausted` or
+`quota exceeded` condition maps to the fixed detail `storage quota exhausted`, including
+for 403 and 5xx responses. Unknown messages use the status-only mapping. This is stricter
+than masking configured credentials: an unknown token, password, or internal hostname
+could otherwise be present in backend text. Successful answers are never altered.
 
 Validation failures (bad path, oversize, not UTF-8, binary file to a text tool,
 wrong base64) are ToolErrors too, raised before any request.
