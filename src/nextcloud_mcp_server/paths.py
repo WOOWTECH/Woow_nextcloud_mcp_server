@@ -86,8 +86,16 @@ def href_to_path(href: str, home_path: str) -> str | None:
     return href_path[len(home) :].strip("/")
 
 
+# Apache's mod_deflate (and mod_brotli) add the content coding to the ETag of a compressed
+# response ("abc" becomes "abc-gzip": DeflateAlterETag AddSuffix is the default), so the ETag
+# a GET of a compressed text file (in practice every one from about 1 KB up) returns is one
+# that neither If-Match nor a PROPFIND getetag will ever show. Nextcloud's own ETags are plain
+# hex strings: the suffix is never part of one.
+_CODING_SUFFIXES = ("-gzip", "-br", "-deflate", "-zstd")
+
+
 def normalize_etag(etag: str | None) -> str | None:
-    """Return an ETag without ``W/`` prefix and surrounding quotes (``None`` stays ``None``)."""
+    """Return an ETag without ``W/``, quotes and content-coding suffix (``None`` stays ``None``)."""
     if etag is None:
         return None
     value = etag.strip()
@@ -95,6 +103,10 @@ def normalize_etag(etag: str | None) -> str | None:
         value = value[2:].strip()
     if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
         value = value[1:-1]
+    for suffix in _CODING_SUFFIXES:
+        if value.endswith(suffix) and len(value) > len(suffix):
+            value = value[: -len(suffix)]
+            break
     return value or None
 
 

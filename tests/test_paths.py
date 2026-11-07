@@ -121,6 +121,18 @@ def test_href_to_path_home_without_slash() -> None:
         (' "abc" ', "abc"),
         ('""', None),
         ("", None),
+        # Apache's mod_deflate answers a compressed GET with "<etag>-gzip" (mod_brotli "-br"):
+        # the file's etag is the plain part.
+        ('"abc123-gzip"', "abc123"),
+        ('W/"abc123-gzip"', "abc123"),
+        ("abc123-gzip", "abc123"),
+        ('"abc123-br"', "abc123"),
+        ('"abc123-deflate"', "abc123"),
+        ('"abc123-zstd"', "abc123"),
+        ('"6b520502fdd60229b4a10a23dd1e910a-gzip"', "6b520502fdd60229b4a10a23dd1e910a"),
+        ('"gzip"', "gzip"),
+        ('"x-gzipped"', "x-gzipped"),
+        ('"-gzip"', "-gzip"),
     ],
 )
 def test_normalize_etag(raw: str | None, expected: str | None) -> None:
@@ -130,6 +142,8 @@ def test_normalize_etag(raw: str | None, expected: str | None) -> None:
 def test_caller_etag() -> None:
     assert caller_etag('"abc"') == "abc"
     assert caller_etag('W/"abc"') == "abc"
+    # an etag still held from a read made before the suffix was dropped
+    assert caller_etag('"abc-gzip"') == "abc"
     for bad in ("", '""', "  "):
         with pytest.raises(ToolError, match="must not be empty"):
             caller_etag(bad)

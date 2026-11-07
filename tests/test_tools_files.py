@@ -176,6 +176,33 @@ async def test_read_text_file(tools: NextcloudTools, fake: FakeNextcloud) -> Non
     assert await tools.get_file_content("Docs/a #1.md") == "hash name"
 
 
+async def test_etag_of_a_compressed_read_works_for_conditional_writes(
+    tools: NextcloudTools, fake: FakeNextcloud
+) -> None:
+    # Apache's mod_deflate answers the GET of a compressed text file with the ETag
+    # "<etag>-gzip": on a real Nextcloud that is every file from 1 KB up (the 0.4.12 real-backend
+    # rounds first saw it on 300 KB and 200 KB files). The etag read_text_file hands out must be
+    # the file's own, or the update/delete it is meant for fails forever with ETAG_MISMATCH.
+    fake.gzip_etag_over = 1000
+    big, big2, big3 = (
+        fake.add_file(f"Docs/{name}.txt", b"x" * 5000) for name in ("big", "big2", "big3")
+    )
+    read = await tools.read_text_file("Docs/big.txt")
+    assert read["etag"] == big.etag and read["content"] == "x" * 5000
+    small = await tools.read_text_file("Docs/readme.md")  # not compressed: untouched
+    assert small["etag"] == fake.files["Docs/readme.md"].etag
+    updated = await tools.update_text_file("Docs/big.txt", "y" * 3000, read["etag"])
+    assert updated["status"] == "updated" and updated["previous_etag"] == big.etag
+    assert fake.files["Docs/big.txt"].data == b"y" * 3000
+    read2 = await tools.read_text_file("Docs/big2.txt")
+    deleted = await tools.delete_file_checked("Docs/big2.txt", read2["etag"])
+    assert deleted["status"] == "deleted" and "Docs/big2.txt" not in fake.files
+    # an etag a caller still holds from an earlier read (with the suffix) is accepted too
+    deleted = await tools.delete_file_checked("Docs/big3.txt", f'"{big3.etag}-gzip"')
+    assert deleted["status"] == "deleted" and "Docs/big3.txt" not in fake.files
+    assert big2.etag != big3.etag
+
+
 async def test_read_strips_bom_but_counts_it(tools: NextcloudTools, fake: FakeNextcloud) -> None:
     fake.add_file("bom.txt", "﻿hello 世界".encode())
     result = await tools.read_text_file("bom.txt")
