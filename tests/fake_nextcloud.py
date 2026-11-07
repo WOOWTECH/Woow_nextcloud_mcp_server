@@ -52,6 +52,10 @@ class FakeNextcloud:
         self.send_put_etag = True
         # Mimic Nextcloud's ~1 s ETag resolution: a replace may keep the old ETag.
         self.keep_etag_on_put = False
+        # Mimic Apache's mod_deflate (DeflateAlterETag AddSuffix): the GET of a file larger than
+        # this answers the ETag "<etag>-gzip" while PROPFIND and the write responses keep the
+        # plain one. None = never.
+        self.gzip_etag_over: int | None = None
         self._etags = itertools.count(1)
         self.user_requests = 0
 
@@ -175,10 +179,13 @@ class FakeNextcloud:
             if not exists_file:
                 return httpx.Response(404)
             item = self.files[rel]
+            etag = item.etag
+            if self.gzip_etag_over is not None and len(item.data) > self.gzip_etag_over:
+                etag += "-gzip"
             return httpx.Response(
                 200,
                 content=item.data,
-                headers={"ETag": f'"{item.etag}"', "Content-Type": item.content_type},
+                headers={"ETag": f'"{etag}"', "Content-Type": item.content_type},
             )
         if method == "PUT":
             if exists_folder:
