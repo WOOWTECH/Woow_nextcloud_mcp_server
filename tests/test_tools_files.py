@@ -179,10 +179,10 @@ async def test_read_text_file(tools: NextcloudTools, fake: FakeNextcloud) -> Non
 async def test_etag_of_a_compressed_read_works_for_conditional_writes(
     tools: NextcloudTools, fake: FakeNextcloud
 ) -> None:
-    # Apache's mod_deflate answers the GET of a larger text file with the ETag "<etag>-gzip"
-    # (the 0.4.12 real-backend rounds saw it on 300 KB and 200 KB files). The etag
-    # read_text_file hands out must be the file's own, or the update/delete it is meant for
-    # fails forever with ETAG_MISMATCH.
+    # Apache's mod_deflate answers the GET of a compressed text file with the ETag
+    # "<etag>-gzip": on a real Nextcloud that is every file from 1 KB up (the 0.4.12 real-backend
+    # rounds first saw it on 300 KB and 200 KB files). The etag read_text_file hands out must be
+    # the file's own, or the update/delete it is meant for fails forever with ETAG_MISMATCH.
     fake.gzip_etag_over = 1000
     big, big2, big3 = (
         fake.add_file(f"Docs/{name}.txt", b"x" * 5000) for name in ("big", "big2", "big3")

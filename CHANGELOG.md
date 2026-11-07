@@ -8,8 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- The etag `read_text_file` returned for a larger text file could never be used for `update_text_file`, `upload_file`
-  (replace) or `delete_file_checked`. Apache's `mod_deflate` answers a compressed GET with `ETag: "<etag>-gzip"`
+- The etag `read_text_file` returned for a text file that Apache compresses could never be used for `update_text_file`,
+  `upload_file` (replace) or `delete_file_checked`. On a real Nextcloud behind Apache that was every text file from 1 KB
+  up (a 10-byte file was served uncompressed). Apache's `mod_deflate` answers a compressed GET with `ETag: "<etag>-gzip"`
   (`DeflateAlterETag AddSuffix`, the default) while PROPFIND and the write responses keep the plain etag, so every
   conditional write failed with `ETAG_MISMATCH` ("changed since it was read", the current etag shown without the suffix)
   and reading again returned the same unusable etag. `normalize_etag` now drops a trailing `-gzip`, `-br`, `-deflate` or

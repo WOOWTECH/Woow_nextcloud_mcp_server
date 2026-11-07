@@ -88,8 +88,9 @@ def href_to_path(href: str, home_path: str) -> str | None:
 
 # Apache's mod_deflate (and mod_brotli) add the content coding to the ETag of a compressed
 # response ("abc" becomes "abc-gzip": DeflateAlterETag AddSuffix is the default), so the ETag
-# a GET of a larger text file returns is one that neither If-Match nor a PROPFIND getetag will
-# ever show. Nextcloud's own ETags are plain hex strings: the suffix is never part of one.
+# a GET of a compressed text file (in practice every one from about 1 KB up) returns is one
+# that neither If-Match nor a PROPFIND getetag will ever show. Nextcloud's own ETags are plain
+# hex strings: the suffix is never part of one.
 _CODING_SUFFIXES = ("-gzip", "-br", "-deflate", "-zstd")
 
 
